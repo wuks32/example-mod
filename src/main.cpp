@@ -3,68 +3,71 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <vector>
+#include <string>
 #include <algorithm>
-#include <chrono>
+#include <cmath>
 
 using namespace geode::prelude;
 
 // ---------- Stages (1 tick = 0.25 frames @ 60fps, 240 TPS) ----------
-struct Stage { int ticks; const char* label; };
+struct Stage { int all; int wave; const char* name; };
 static const Stage STAGES[] = {
-    {0,  "STAGE 5: OFF (100% Raw Input)"},
-    {2,  "STAGE 1: 2 Ticks"},
-    {4,  "STAGE 2: 4 Ticks"},
-    {8,  "STAGE 3: 8 Ticks"},
-    {16, "STAGE 4: 16 Ticks"},
+    {2,  2, "STAGE 1"},
+    {4,  4, "STAGE 2"},
+    {8,  8, "STAGE 3"},
+    {16, 8, "STAGE 4"},
+    {0,  0, "STAGE 5"},
 };
 static constexpr int STAGE_COUNT = 5;
-static int g_stage = 0;
-static int bufferTicks() { return STAGES[g_stage].ticks; }
-static float ticksToFrames(int t) { return t / 4.0f; }
+static int g_stage = 0;   // starts on STAGE 1 like the original
 
-// How far ahead (ticks) we check that you survive. 8 ticks = 2 frames.
-static constexpr int LOOKAHEAD = 8;
-// If one decision takes longer than this, skip buffering for that input.
-static constexpr double MAX_DECISION_MS = 25.0;
+static std::string stageText(const Stage& s) {
+    if (s.all == 0) return fmt::format("{}: OFF (100% Raw Input)", s.name);
+    float a = s.all / 4.f, w = s.wave / 4.f;
+    std::string fr = (s.all == s.wave)
+        ? fmt::format("{:.1f}f @ 60fps", a)
+        : fmt::format("{:.1f}f / {:.1f}f @ 60fps", a, w);
+    return fmt::format("{}: {} Ticks All | {} Ticks Wave ({})", s.name, s.all, s.wave, fr);
+}
+
+// How many ticks ahead we check the wave path.
+static constexpr int LOOKAHEAD = 10;
 
 // ---------- Shared state ----------
-struct Ev { bool down; int button; bool p1; long fireTick; long madeTick; };
-static std::vector<Ev> g_in;    // freshly caught inputs, waiting for a decision
-static std::vector<Ev> g_q;     // decided inputs waiting for their fire tick
-static long g_tick = 0;
-static bool g_sim = false;      // inside a lookahead simulation
-static bool g_fire = false;     // we are applying an input ourselves
-static bool g_simDead = false;  // player died during simulation
-static bool g_busy = false;     // decision in progress (blocks re-entry)
+struct Ev   { bool down; int button; bool p1; long fireTick; long madeTick; };
+struct Land { int button; bool p1; long startTick; int limit; bool releaseQueued; };
+
+static std::vector<Ev>   g_in;    // inputs caught this tick, waiting for a decision
+static std::vector<Ev>   g_q;     // wave inputs delayed to a later tick (kept in fire order)
+static std::vector<Land> g_land;  // non-wave clicks waiting to land
+static long  g_tick = 0;
+static bool  g_fire = false;      // we are applying an input ourselves
+static bool  g_held = false;      // is player 1's jump button currently held (as applied)
+static float g_lastX = 0.f;
+static float g_dx = 0.f;          // measured x movement per tick
 
 // ---------- F6 cycling ----------
 class $modify(BufferKeys, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
         if (down && !repeat && key == KEY_F6) {
             g_stage = (g_stage + 1) % STAGE_COUNT;
-            log::info("[InputBuffer] F6 Cycle -> {} | {} Ticks ({:.1f}f @ 60fps)",
-                      STAGES[g_stage].label, STAGES[g_stage].ticks,
-                      ticksToFrames(STAGES[g_stage].ticks));
+            log::info("[InputBuffer] F6 Cycle -> {}", stageText(STAGES[g_stage]));
         }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
     }
 };
 
-// ---------- Death handling + reset ----------
+// ---------- Reset ----------
 class $modify(BufferPlay, PlayLayer) {
-    void destroyPlayer(PlayerObject* player, GameObject* obj) {
-        if (g_sim) {            // simulated death: record only, never really die
-            g_simDead = true;
-            return;
-        }
-        PlayLayer::destroyPlayer(player, obj);
-    }
-
     void resetLevel() {
         PlayLayer::resetLevel();
         g_in.clear();
         g_q.clear();
+        g_land.clear();
         g_tick = 0;
+        g_held = false;
+        g_lastX = 0.f;
+        g_dx = 0.f;
     }
 };
 
@@ -72,144 +75,189 @@ class $modify(BufferPlay, PlayLayer) {
 class $modify(BufferLayer, GJBaseGameLayer) {
 
     bool bufferActive() {
-        if (bufferTicks() == 0) return false;
+        if (STAGES[g_stage].all == 0) return false;
         auto pl = PlayLayer::get();
         if (!pl || static_cast<GJBaseGameLayer*>(pl) != this) return false;
         if (!m_player1 || m_player1->m_isDead) return false;
         return true;
     }
 
-    // Just catch the input. NO simulation here (game is mid input-loop).
+    void applyNow(bool down, int button, bool p1) {
+        g_fire = true;
+        GJBaseGameLayer::handleButton(down, button, p1);
+        g_fire = false;
+        if (button == 1 && p1) g_held = down;
+    }
+
+    // Only catches the input. No heavy work here (game is mid input-loop).
     void handleButton(bool down, int button, bool isPlayer1) {
-        if (g_fire || g_sim || g_busy || !bufferActive()) {
+        if (g_fire || button != 1 || !isPlayer1 || !bufferActive()) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            if (!g_fire && button == 1 && isPlayer1) g_held = down;
             return;
         }
         g_in.push_back({down, button, isPlayer1, g_tick, g_tick});
     }
 
-    void applyNow(const Ev& ev) {
-        g_fire = true;
-        GJBaseGameLayer::handleButton(ev.down, ev.button, ev.p1);
-        g_fire = false;
-    }
+    // ---------- WAVE: trace the straight path, pick earliest safe delay ----------
+    void decideWave(Ev ev) {
+        int limit = STAGES[g_stage].wave;
+        CCPoint p = m_player1->getPosition();
+        float dx = g_dx > 0.01f ? g_dx : (m_player1->m_playerSpeed * 346.2f / 240.f);
+        float size = m_player1->m_vehicleSize > 0.f ? m_player1->m_vehicleSize : 1.f;
+        float slope = size < 1.f ? 2.f : 1.f;       // mini wave is steeper
+        float half = 4.5f * size;                   // wave hitbox half-size
+        bool upsideDown = m_player1->m_isUpsideDown;
 
-    // Rewind to cp, apply ev after `delay` ticks, run, report if player survived.
-    bool survives(PlayLayer* pl, CheckpointObject* cp, const Ev& ev, int delay) {
-        pl->loadFromCheckpoint(cp);
-        g_sim = true;
-        g_simDead = false;
-
-        for (int t = 0; t <= delay + LOOKAHEAD && !g_simDead; t++) {
-            g_fire = true;
-            for (auto& q : g_q)
-                if (q.fireTick - g_tick == t)
-                    GJBaseGameLayer::handleButton(q.down, q.button, q.p1);
-            if (t == delay)
-                GJBaseGameLayer::handleButton(ev.down, ev.button, ev.p1);
-            g_fire = false;
-
-            GJBaseGameLayer::update(1.f / 240.f);
+        // Gather nearby solids and hazards once (no game stepping).
+        float reachX = dx * (limit + LOOKAHEAD + 2) + 60.f;
+        float reachY = reachX * slope + 60.f;
+        std::vector<CCRect> boxes;
+        for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+            if (!obj) continue;
+            auto t = obj->m_objectType;
+            if (t != GameObjectType::Solid && t != GameObjectType::Hazard) continue;
+            auto op = obj->getPosition();
+            if (std::fabs(op.x - p.x) > reachX || std::fabs(op.y - p.y) > reachY) continue;
+            boxes.push_back(obj->getObjectRect());
         }
-
-        g_sim = false;
-        return !g_simDead;
-    }
-
-    // Decide the delay for one caught input. Called outside the input loop.
-    void decide(Ev ev) {
-        auto pl = PlayLayer::get();
-        int limit = bufferTicks();
 
         long minTick = g_tick;
         for (auto& q : g_q) minTick = std::max(minTick, q.fireTick);
         int startDelay = (int)(minTick - g_tick);
 
-        auto t0 = std::chrono::steady_clock::now();
-        auto elapsedMs = [&]() {
-            return std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t0).count();
+        bool curHeld = g_held;
+        auto pathSafe = [&](int d) -> bool {
+            float x = p.x, y = p.y;
+            for (int t = 1; t <= d + LOOKAHEAD; t++) {
+                bool held = curHeld;
+                for (auto& q : g_q)
+                    if (q.fireTick - g_tick < t) held = q.down;
+                if (t > d) held = ev.down;
+                bool up = (held != upsideDown);
+                x += dx;
+                y += (up ? 1.f : -1.f) * dx * slope;
+                CCRect w(x - half, y - half, half * 2.f, half * 2.f);
+                for (auto& b : boxes)
+                    if (b.intersectsRect(w)) return false;
+            }
+            return true;
         };
 
-        CheckpointObject* cp = pl->createCheckpoint();   // autoreleased by the game
         int chosen = -1;
-        bool timedOut = false;
+        for (int d = startDelay; d <= limit; d++) {
+            if (pathSafe(d)) { chosen = d; break; }
+        }
 
-        if (cp) {
-            for (int d = startDelay; d <= limit; d++) {
-                if (survives(pl, cp, ev, d)) { chosen = d; break; }
-                if (elapsedMs() > MAX_DECISION_MS) { timedOut = true; break; }
+        if (chosen == 0 && startDelay == 0) {          // already safe: untouched input
+            applyNow(ev.down, ev.button, ev.p1);
+            return;
+        }
+        if (chosen < 0) {                               // nothing safe: send raw
+            if (startDelay == 0) {
+                log::info("[InputBuffer] {} @ tick {}: no safe delay within {} ticks, raw",
+                          ev.down ? "PRESS" : "RELEASE", g_tick, limit);
+                applyNow(ev.down, ev.button, ev.p1);
+                return;
             }
-            pl->loadFromCheckpoint(cp);   // restore the real game state
+            chosen = startDelay;
         }
-
-        if (timedOut) {
-            log::info("[InputBuffer] decision too slow ({:.1f} ms), sending raw", elapsedMs());
-            if (startDelay == 0) { applyNow(ev); return; }
-        }
-
-        if (chosen == 0 && startDelay == 0) {
-            applyNow(ev);                       // already safe, no change
-            return;
-        }
-
-        if (chosen < 0 && startDelay == 0) {
-            log::info("[InputBuffer] {} @ tick {}: no safe delay within {} ticks, sending raw",
-                      ev.down ? "PRESS" : "RELEASE", g_tick, limit);
-            applyNow(ev);
-            return;
-        }
-
-        int use = chosen < 0 ? startDelay : chosen;
-        ev.fireTick = g_tick + use;
+        ev.fireTick = g_tick + chosen;
         g_q.push_back(ev);
-        log::info("[InputBuffer] BUFFERED {} @ tick {} -> fires in {} ticks ({:.1f} ms)",
-                  ev.down ? "PRESS" : "RELEASE", g_tick, use, elapsedMs());
+        log::info("[InputBuffer] BUFFERED {} @ tick {} -> fires in {} ticks",
+                  ev.down ? "PRESS" : "RELEASE", g_tick, chosen);
+    }
+
+    // ---------- ALL OTHER MODES: hold the click until you land ----------
+    void decideGround(Ev ev) {
+        int limit = STAGES[g_stage].all;
+        if (!ev.down) {
+            for (auto& l : g_land)
+                if (l.button == ev.button && l.p1 == ev.p1) { l.releaseQueued = true; return; }
+            applyNow(ev.down, ev.button, ev.p1);
+            return;
+        }
+        applyNow(ev.down, ev.button, ev.p1);
+        if (!m_player1->m_isOnGround) {
+            g_land.push_back({ev.button, ev.p1, g_tick, limit, false});
+            log::info("[InputBuffer] BUFFERED click @ tick {} (waiting up to {} ticks)",
+                      g_tick, limit);
+        }
+    }
+
+    void flushAllRaw() {
+        for (auto& e : g_in) applyNow(e.down, e.button, e.p1);
+        for (auto& e : g_q)  applyNow(e.down, e.button, e.p1);
+        for (auto& l : g_land) if (l.releaseQueued) applyNow(false, l.button, l.p1);
+        g_in.clear(); g_q.clear(); g_land.clear();
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (isHalfTick) return;
 
-        if (g_sim || g_busy) return;   // simulation steps never touch real state
+        g_tick++;
+        if (m_player1) {
+            float x = m_player1->getPositionX();
+            g_dx = x - g_lastX;
+            g_lastX = x;
+        }
 
-        if (!isHalfTick) g_tick++;
-
-        if (!bufferActive()) {
-            g_in.clear();
-            g_q.clear();
+        if (!bufferActive()) {          // never drop inputs when switching off
+            if (!g_in.empty() || !g_q.empty() || !g_land.empty()) flushAllRaw();
             return;
         }
 
-        // 1) Decide caught inputs (safe spot: outside the game's input loop).
+        // 1) Decide freshly caught inputs.
         if (!g_in.empty()) {
-            g_busy = true;
             std::vector<Ev> work;
             work.swap(g_in);
-            for (auto& ev : work) decide(ev);
-            g_busy = false;
+            bool wave = m_player1->m_isDart;
+            for (auto& ev : work) {
+                if (wave) decideWave(ev);
+                else      decideGround(ev);
+            }
         }
 
-        // 2) Fire delayed inputs whose time has come.
+        // 2) Fire delayed wave inputs whose time has come.
         for (auto it = g_q.begin(); it != g_q.end();) {
             if (it->fireTick <= g_tick) {
-                applyNow(*it);
+                applyNow(it->down, it->button, it->p1);
                 long saved = g_tick - it->madeTick;
                 log::info("[InputBuffer] *** SAVED +{} TICKS ({:.2f} frames @ 60fps) {}! "
                           "(Frame0: {} -> Delayed: {}) [Limit: {}] ***",
-                          saved, ticksToFrames((int)saved),
-                          it->down ? "PRESS" : "RELEASE",
-                          it->madeTick, g_tick, bufferTicks());
+                          saved, saved / 4.f, it->down ? "PRESS" : "RELEASE",
+                          it->madeTick, g_tick, STAGES[g_stage].wave);
                 it = g_q.erase(it);
-            } else {
-                ++it;
+            } else ++it;
+        }
+
+        // 3) Fire click-until-landing inputs.
+        for (auto it = g_land.begin(); it != g_land.end();) {
+            PlayerObject* pl = it->p1 ? m_player1 : m_player2;
+            long elapsed = g_tick - it->startTick;
+            bool done = false;
+            if (pl && pl->m_isOnGround) {
+                applyNow(true, it->button, it->p1);
+                if (it->releaseQueued) applyNow(false, it->button, it->p1);
+                log::info("[InputBuffer] *** SAVED +{} TICKS ({:.2f} frames @ 60fps) PRESS! "
+                          "(Frame0: {} -> Delayed: {}) [Limit: {}] ***",
+                          elapsed, elapsed / 4.f, it->startTick, g_tick, it->limit);
+                done = true;
+            } else if (elapsed >= it->limit) {
+                if (it->releaseQueued) applyNow(false, it->button, it->p1);
+                log::info("[InputBuffer] EXPIRED (never landed within {} ticks)", it->limit);
+                done = true;
             }
+            if (done) it = g_land.erase(it); else ++it;
         }
     }
 };
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v5.1 LOADED (lookahead buffer, crash-safe hooks)");
-    log::info("[InputBuffer] Press F6 in-level to cycle: 2 -> 4 -> 8 -> 16 -> OFF");
+    log::info("[InputBuffer] v5.2 LOADED (cheap wave path check, no simulation)");
+    log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
+    log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF");
     log::info("====================================================");
 }

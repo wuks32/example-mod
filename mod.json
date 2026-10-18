@@ -1,32 +1,19 @@
 {
-  "geode": "5.11.2",
-  "gd": {
-    "win": "2.2081"
-  },
-  "id": "wuks32.input-buffer",
-  "name": "InputBuffer",
-  "version": "v4.6.0",
-  "developer": "wuks32",
-  "description": "Delays button releases by a few physics ticks, with separate wave values.",
-  "settings": {
-    "custom-all": {
-      "type": "int",
-      "name": "Custom stage: ticks (all modes)",
-      "default": 6,
-      "min": 0,
-      "max": 64
+    "geode": "5.11.1",
+    "gd": {
+        "win": "2.2081"
     },
-    "custom-wave": {
-      "type": "int",
-      "name": "Custom stage: ticks (wave)",
-      "default": 3,
-      "min": 0,
-      "max": 64
-    },
-    "show-popup": {
-      "type": "bool",
-      "name": "Show in-game popup when cycling",
-      "default": true
+    "id": "albi.predictive-input-buffer",
+    "name": "Predictive Input Buffer",
+    "version": "v4.6.0",
+    "developer": "Albi",
+    "description": "Buffers early inputs. F6 cycles the buffer stage.",
+    "settings": {
+        "allow-normal-mode": {
+            "type": "bool",
+            "name": "Allow outside practice mode",
+            "description": "Off = the buffer only works in practice mode.",
+            "default": false
+        }
     }
-  }
 }

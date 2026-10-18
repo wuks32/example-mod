@@ -18,14 +18,16 @@ struct Stage {
 };
 
 static const Stage STAGES[] = {
-    {2,  2,  "STAGE 1"},
-    {4,  4,  "STAGE 2"},
-    {8,  8,  "STAGE 3"},
-    {16, 8,  "STAGE 4"},
-    {32, 32, "STAGE 5"},
-    {0,  0,  "STAGE 6"},
+    {2,   2,   "STAGE 1"},
+    {4,   4,   "STAGE 2"},
+    {8,   8,   "STAGE 3"},
+    {16,  8,   "STAGE 4"},
+    {32,  32,  "STAGE 5"},
+    {64,  64,  "STAGE 6"},
+    {128, 128, "STAGE 7"},
+    {0,   0,   "STAGE 8"},
 };
-static constexpr int STAGE_COUNT = 6;
+static constexpr int STAGE_COUNT = 8;
 static int g_stage = 0;
 
 static constexpr float STEP_DT = 0.25f;
@@ -393,10 +395,13 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         bool wave = isWave();
         bool cubePress = !wave && ev.down && cubeLike(m_player1);
         int stageLimit = wave ? STAGES[g_stage].wave : STAGES[g_stage].all;
-        int limit = cubePress ? std::max(stageLimit, CUBE_LIMIT) : stageLimit;
+        int limit = cubePress
+            ? (stageLimit >= 64 ? stageLimit : std::max(stageLimit, CUBE_LIMIT))
+            : stageLimit;
         int horizon = cubePress ? CUBE_HORIZON
                     : wave      ? std::min(24, std::max(12, stageLimit + 8))
                                 : std::min(12, std::max(8, stageLimit + 4));
+        double budget = limit >= 64 ? 40.0 : MAX_DECISION_MS;
 
         if (!ensureFakes()) {
             applyNow(ev.down, ev.button, ev.p1);
@@ -476,7 +481,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
 
             if (stepFake(g_fakeA, true)) { tried += '!'; break; }
-            if (ms() > MAX_DECISION_MS) { timedOut = true; break; }
+            if (ms() > budget) { timedOut = true; break; }
         }
 
         for (auto& f : saved) {
@@ -592,7 +597,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v10.6 LOADED (cube holds the click like wave)");
-    log::info("[InputBuffer] Starting Mode: STAGE 1. F6 cycles. Stage 6 is OFF.");
+    log::info("[InputBuffer] v10.7 LOADED");
+    log::info("[InputBuffer] F6: 2 -> 4 -> 8 -> 16/8 -> 32 -> 64 -> 128 -> OFF");
     log::info("====================================================");
 }

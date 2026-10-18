@@ -10,9 +10,10 @@ struct Stage { int all; int wave; };
 static constexpr int STAGE_CUSTOM = 4;
 static constexpr int STAGE_OFF = 5;
 static constexpr int STAGE_COUNT = 6;
+static constexpr float TICKS_PER_SEC = 240.f;
 
 static int  g_stage = 0;
-static int  g_pending[2] = {-1, -1};
+static float g_pending[2] = {-1.f, -1.f};   // seconds left before delayed release fires, -1 = none
 static bool g_replaying = false;
 
 static Stage getStage(int i) {
@@ -42,9 +43,6 @@ static std::string describe(int i) {
 
 class $modify(BufferLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
-        log::info("[InputBuffer] handleButton down={} button={} p1={} replaying={} stage={}",
-                  down, button, isPlayer1, g_replaying, g_stage);
-
         if (button != 1 || g_replaying || g_stage == STAGE_OFF) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
@@ -59,19 +57,26 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         }
 
         if (down) {
-            g_pending[idx] = -1;
+            // If a release is still waiting, deliver it now so this click registers as a fresh press
+            if (g_pending[idx] >= 0.f) {
+                g_pending[idx] = -1.f;
+                g_replaying = true;
+                GJBaseGameLayer::handleButton(false, button, isPlayer1);
+                g_replaying = false;
+            }
             GJBaseGameLayer::handleButton(true, button, isPlayer1);
         } else {
-            log::info("[InputBuffer] release delayed by {} ticks", ticks);
-            g_pending[idx] = ticks;
+            g_pending[idx] = ticks / TICKS_PER_SEC;
+            log::info("[InputBuffer] release delayed {} ticks ({:.4f}s)", ticks, g_pending[idx]);
         }
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         for (int i = 0; i < 2; i++) {
-            if (g_pending[i] < 0) continue;
-            if (--g_pending[i] <= 0) {
-                g_pending[i] = -1;
+            if (g_pending[i] < 0.f) continue;
+            g_pending[i] -= dt;
+            if (g_pending[i] <= 0.f) {
+                g_pending[i] = -1.f;
                 log::info("[InputBuffer] firing delayed release p{}", i + 1);
                 g_replaying = true;
                 GJBaseGameLayer::handleButton(false, 1, i == 0);
@@ -86,7 +91,7 @@ class $modify(PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         g_stage = Mod::get()->getSavedValue<int>("stage", 0);
-        g_pending[0] = g_pending[1] = -1;
+        g_pending[0] = g_pending[1] = -1.f;
         log::info("==============================================================");
         log::info("[InputBuffer] v4.6 LOADED");
         log::info("[InputBuffer] Starting Mode: {}", describe(g_stage));
@@ -96,7 +101,7 @@ class $modify(PlayLayer) {
     }
 
     void resetLevel() {
-        g_pending[0] = g_pending[1] = -1;
+        g_pending[0] = g_pending[1] = -1.f;
         PlayLayer::resetLevel();
     }
 };

@@ -6,10 +6,10 @@
 
 using namespace geode::prelude;
 
-// ---------- Stages ----------
+// ---------- Stages (1 tick = 0.25 frames @ 60fps, 240 TPS) ----------
 struct Stage { int ticks; const char* label; };
 static const Stage STAGES[] = {
-    {0,  "OFF (100% Raw Input)"},
+    {0,  "STAGE 5: OFF (100% Raw Input)"},
     {2,  "STAGE 1: 2 Ticks"},
     {4,  "STAGE 2: 4 Ticks"},
     {8,  "STAGE 3: 8 Ticks"},
@@ -19,12 +19,14 @@ static constexpr int STAGE_COUNT = 5;
 static int g_stage = 0;
 
 static int bufferTicks() { return STAGES[g_stage].ticks; }
+static float ticksToFrames(int t) { return t / 4.0f; }
 
 // ---------- Pending inputs ----------
 struct PendingPress {
     int  button;
     bool player1;
-    int  ticksLeft;
+    long startTick;
+    int  limit;
     bool releaseQueued = false;
 };
 
@@ -33,8 +35,9 @@ class $modify(BufferKeys, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
         if (down && !repeat && key == KEY_F6 && PlayLayer::get()) {
             g_stage = (g_stage + 1) % STAGE_COUNT;
-            log::info("[InputBuffer] F6 Cycle -> {} | buffering {} ticks",
-                      STAGES[g_stage].label, STAGES[g_stage].ticks);
+            log::info("[InputBuffer] F6 Cycle -> {} | {} Ticks ({:.1f}f @ 60fps)",
+                      STAGES[g_stage].label, STAGES[g_stage].ticks,
+                      ticksToFrames(STAGES[g_stage].ticks));
         }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
     }
@@ -44,7 +47,8 @@ class $modify(BufferKeys, CCKeyboardDispatcher) {
 class $modify(BufferLayer, GJBaseGameLayer) {
     struct Fields {
         std::vector<PendingPress> pending;
-        bool firing = false;   // bypass flag so our own re-fired inputs aren't re-buffered
+        long tickCounter = 0;
+        bool firing = false;   // our own re-fired inputs must not be re-buffered
     };
 
     bool bufferActive() {
@@ -64,16 +68,23 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             return;
         }
 
+        PlayerObject* pl = isPlayer1 ? m_player1 : m_player2;
+
         if (down) {
-            // Pass it through now (works if the player can act immediately)...
+            // Always pass the click through (orbs, pads, other modes keep working).
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            // ...and also remember it so it fires on landing if clicked early.
-            f->pending.push_back({button, isPlayer1, bufferTicks()});
+
+            // Only buffer clicks made while airborne. Grounded clicks just work.
+            if (pl && !pl->m_isOnGround) {
+                f->pending.push_back({button, isPlayer1, f->tickCounter, bufferTicks()});
+                log::info("[InputBuffer] BUFFERED click @ tick {} (waiting up to {} ticks)",
+                          f->tickCounter, bufferTicks());
+            }
             return;
         }
 
-        // Release: if a press for this button is still waiting, delay the release
-        // until after that press has fired so short taps still jump.
+        // Release: if this button's press is still waiting, hold the release back
+        // until the press has fired, so short taps still make a full jump.
         for (auto& p : f->pending) {
             if (p.button == button && p.player1 == isPlayer1) {
                 p.releaseQueued = true;
@@ -86,10 +97,11 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
 
-        // Only count full ticks so the tick windows stay accurate.
         if (isHalfTick) return;
 
         auto f = m_fields.self();
+        f->tickCounter++;
+
         if (f->pending.empty()) return;
 
         if (!bufferActive()) {
@@ -100,24 +112,30 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         f->firing = true;
         for (auto it = f->pending.begin(); it != f->pending.end();) {
             PlayerObject* pl = it->player1 ? m_player1 : m_player2;
-            bool fired = false;
+            long elapsed = f->tickCounter - it->startTick;
+            bool done = false;
 
             if (pl && pl->m_isOnGround) {
+                // Landed: fire the click now.
                 GJBaseGameLayer::handleButton(true, it->button, it->player1);
                 if (it->releaseQueued)
                     GJBaseGameLayer::handleButton(false, it->button, it->player1);
-                fired = true;
-                log::info("[InputBuffer] Saved {} ticks", it->ticksLeft);
+                log::info("[InputBuffer] *** SAVED +{} TICKS ({:.2f} frames @ 60fps) PRESS! "
+                          "(Frame0: {} -> Delayed: {}) [Limit: {}] ***",
+                          elapsed, ticksToFrames((int)elapsed),
+                          it->startTick, f->tickCounter, it->limit);
+                done = true;
+            } else if (elapsed >= it->limit) {
+                // Window ran out before landing: too early, give up.
+                if (it->releaseQueued)
+                    GJBaseGameLayer::handleButton(false, it->button, it->player1);
+                log::info("[InputBuffer] EXPIRED (clicked too early, never landed in {} ticks)",
+                          it->limit);
+                done = true;
             }
 
-            if (fired || --it->ticksLeft <= 0) {
-                // Window expired: make sure a queued release isn't lost.
-                if (!fired && it->releaseQueued)
-                    GJBaseGameLayer::handleButton(false, it->button, it->player1);
-                it = f->pending.erase(it);
-            } else {
-                ++it;
-            }
+            if (done) it = f->pending.erase(it);
+            else ++it;
         }
         f->firing = false;
     }
@@ -127,7 +145,9 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 class $modify(PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
-        static_cast<BufferLayer*>(static_cast<GJBaseGameLayer*>(this))->m_fields->pending.clear();
+        auto f = static_cast<BufferLayer*>(static_cast<GJBaseGameLayer*>(this))->m_fields.self();
+        f->pending.clear();
+        f->tickCounter = 0;
     }
 };
 

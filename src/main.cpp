@@ -284,8 +284,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (!died) {
             auto touchesHazard = [](CCDictionary* d) {
                 if (!d) return false;
-                CCDictElement* el = nullptr;
-                CCDICT_FOREACH(d, el) {
+                // Walk the elements directly (CCDICT_FOREACH was removed in Geode v5).
+                // Keys are never read, so it works whatever key type the game uses.
+                for (CCDictElement* el = d->m_pElements; el != nullptr;
+                     el = static_cast<CCDictElement*>(el->hh.next)) {
                     auto o = typeinfo_cast<GameObject*>(el->getObject());
                     if (o && o->m_objectType == GameObjectType::Hazard) return true;
                 }

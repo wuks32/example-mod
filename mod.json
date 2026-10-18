@@ -1,17 +1,32 @@
 {
-	"geode": "$GEODE_VERSION",
-	"gd": {
-		"win": "2.2081",
-		"android": "2.2081",
-		"mac": "2.2081",
-		"ios": "2.2081"
-	},
-	"id": "$MOD_ID",
-	"name": "$MOD_NAME",
-	"version": "$MOD_VERSION",
-	"developer": "$MOD_DEVELOPER",
-	"description": "$MOD_DESCRIPTION",
-	"dependencies": {
-		"geode.node-ids": ">=v1.23.3"
-	}
+  "geode": "4.6.0",
+  "gd": {
+    "win": "2.2081"
+  },
+  "id": "wuks32.input-buffer",
+  "name": "InputBuffer",
+  "version": "v4.6.0",
+  "developer": "wuks32",
+  "description": "Delays button releases by a few physics ticks, with separate wave values.",
+  "settings": {
+    "custom-all": {
+      "type": "int",
+      "name": "Custom stage: ticks (all modes)",
+      "default": 6,
+      "min": 0,
+      "max": 64
+    },
+    "custom-wave": {
+      "type": "int",
+      "name": "Custom stage: ticks (wave)",
+      "default": 3,
+      "min": 0,
+      "max": 64
+    },
+    "show-popup": {
+      "type": "bool",
+      "name": "Show in-game popup when cycling",
+      "default": true
+    }
+  }
 }

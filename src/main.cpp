@@ -73,6 +73,7 @@ class $modify(BufferPlay, PlayLayer) {
             g_fakeDead = true;      // clone died: record it, never really die
             return;
         }
+        log::info("[InputBuffer] DBG REAL DEATH at tick {}", g_tick);
         PlayLayer::destroyPlayer(player, obj);
     }
 
@@ -157,14 +158,22 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     // Clone B: restore tick-t state, press/release, run forward, survive?
     bool trial(const Ev& ev, bool heldPre) {
         g_fakeB->loadFromCheckpoint(g_cpT);
+        CCPoint s = g_fakeB->getPosition();
         fakeInput(g_fakeB, heldPre);
         fakeInput(g_fakeB, ev.down);
-        for (int i = 0; i < LOOKAHEAD; i++) {
+        bool ok = true;
+        int steps = 0;
+        for (; steps < LOOKAHEAD; steps++) {
             g_fakeDead = false;
             stepFake(g_fakeB);
-            if (g_fakeDead) return false;
+            if (g_fakeDead) { ok = false; break; }
         }
-        return true;
+        CCPoint e = g_fakeB->getPosition();
+        CCPoint r = m_player1->getPosition();
+        log::info("[InputBuffer] DBG real=({:.1f},{:.1f}) cloneStart=({:.1f},{:.1f}) "
+                  "cloneEnd=({:.1f},{:.1f}) steps={} survived={}",
+                  r.x, r.y, s.x, s.y, e.x, e.y, steps, ok);
+        return ok;
     }
 
     void decide(Ev ev) {

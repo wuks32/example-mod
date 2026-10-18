@@ -64,7 +64,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         }
     }
 
-    void processCommands(float dt) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         for (int i = 0; i < 2; i++) {
             if (g_pending[i] < 0) continue;
             if (--g_pending[i] <= 0) {
@@ -74,7 +74,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
                 g_replaying = false;
             }
         }
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 };
 
@@ -97,7 +97,7 @@ class $modify(PlayLayer) {
 };
 
 class $modify(CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
         if (down && !repeat && key == KEY_F6 && PlayLayer::get()) {
             g_stage = (g_stage + 1) % STAGE_COUNT;
             Mod::get()->setSavedValue("stage", g_stage);
@@ -107,6 +107,6 @@ class $modify(CCKeyboardDispatcher) {
                 Notification::create(msg, NotificationIcon::None, 1.5f)->show();
             }
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
     }
 };

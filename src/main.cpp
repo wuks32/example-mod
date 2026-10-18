@@ -43,7 +43,8 @@ static std::string describe(int i) {
 
 class $modify(BufferLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
-        Notification::create(fmt::format("{} b={} p1={}", down ? "PRESS" : "RELEASE", button, isPlayer1), NotificationIcon::None, 0.4f)->show();
+        log::info("[InputBuffer] INPUT {} button={} p1={} replaying={} stage={}",
+                  down ? "PRESS" : "RELEASE", button, isPlayer1, g_replaying, g_stage);
 
         if (button != 1 || g_replaying || g_stage == STAGE_OFF) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
@@ -61,6 +62,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (down) {
             // If a release is still waiting, deliver it now so this click registers as a fresh press
             if (g_pending[idx] >= 0.f) {
+                log::info("[InputBuffer] new press while release pending -> flushing old release first");
                 g_pending[idx] = -1.f;
                 g_replaying = true;
                 GJBaseGameLayer::handleButton(false, button, isPlayer1);
@@ -69,7 +71,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             GJBaseGameLayer::handleButton(true, button, isPlayer1);
         } else {
             g_pending[idx] = ticks / TICKS_PER_SEC;
-            log::info("[InputBuffer] release delayed {} ticks ({:.4f}s)", ticks, g_pending[idx]);
+            log::info("[InputBuffer] release DELAYED {} ticks ({:.4f}s)", ticks, g_pending[idx]);
         }
     }
 
@@ -79,9 +81,8 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             g_pending[i] -= dt;
             if (g_pending[i] <= 0.f) {
                 g_pending[i] = -1.f;
-                log::info("[InputBuffer] firing delayed release p{}", i + 1);
+                log::info("[InputBuffer] delayed release FIRED p{}", i + 1);
                 g_replaying = true;
-                Notification::create("DELAYED RELEASE FIRED", NotificationIcon::None, 0.4f)->show();
                 GJBaseGameLayer::handleButton(false, 1, i == 0);
                 g_replaying = false;
             }
@@ -105,6 +106,7 @@ class $modify(PlayLayer) {
 
     void resetLevel() {
         g_pending[0] = g_pending[1] = -1.f;
+        log::info("[InputBuffer] level reset, pending releases cleared");
         PlayLayer::resetLevel();
     }
 };

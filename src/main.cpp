@@ -83,8 +83,11 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    void processCommands(float dt) {
-        GJBaseGameLayer::processCommands(dt);
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+
+        // Only count full ticks so the tick windows stay accurate.
+        if (isHalfTick) return;
 
         auto f = m_fields.self();
         if (f->pending.empty()) return;

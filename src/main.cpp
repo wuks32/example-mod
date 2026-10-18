@@ -11,7 +11,12 @@
 
 using namespace geode::prelude;
 
-struct Stage { int all; int wave; const char* name; };
+struct Stage {
+    int all;
+    int wave;
+    const char* name;
+};
+
 static const Stage STAGES[] = {
     {2,  2,  "STAGE 1"},
     {4,  4,  "STAGE 2"},
@@ -27,7 +32,13 @@ static int g_stage = 0;
 static constexpr int NEED = 4;
 static constexpr double MAX_DECISION_MS = 6.0;
 
-struct Ev { bool down; int button; bool p1; long fireTick; long madeTick; };
+struct Ev {
+    bool down;
+    int button;
+    bool p1;
+    long fireTick;
+    long madeTick;
+};
 
 static std::vector<Ev> g_in;
 static std::vector<Ev> g_q;
@@ -49,6 +60,16 @@ static GJBaseGameLayer*  g_owner = nullptr;
 
 static bool isClone(PlayerObject* p) {
     return p && (p == g_fakeA || p == g_fakeB);
+}
+
+static bool isIgnoringDamage(GJBaseGameLayer* layer) {
+    if (!layer) return false;
+    if (auto* p = layer->m_player1; p && p->m_ignoreDamage) return true;
+    if (auto* pl = PlayLayer::get()) {
+        // covers built-in playtest Ignore Damage + many noclip mods
+        if (pl->m_ignoreDamage || pl->m_isIgnoreDamageEnabled) return true;
+    }
+    return false;
 }
 
 static std::string stageText(const Stage& s) {
@@ -106,7 +127,7 @@ class $modify(BufferKeys, CCKeyboardDispatcher) {
 class $modify(BufferPlayer, PlayerObject) {
     void playerDestroyed(bool noEffects) {
         if (g_simulating || isClone(this)) {
-            g_fakeDead = true;
+            if (!isIgnoringDamage(this->m_gameLayer)) g_fakeDead = true;
             this->m_isDead = true;
             return;
         }
@@ -122,7 +143,8 @@ class $modify(BufferPlayer, PlayerObject) {
 class $modify(BufferPlay, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
         if (g_simulating || isClone(player)) {
-            g_fakeDead = true;
+            // only mark fake-dead when we are actually simulating deaths
+            if (!isIgnoringDamage(this)) g_fakeDead = true;
             return;
         }
         PlayLayer::destroyPlayer(player, obj);
@@ -250,10 +272,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
     bool stepFake(PlayerObject* p) {
         const float dt = 0.25f;
-        if (p->m_collisionLogTop) p->m_collisionLogTop->removeAllObjects();
+        if (p->m_collisionLogTop)    p->m_collisionLogTop->removeAllObjects();
         if (p->m_collisionLogBottom) p->m_collisionLogBottom->removeAllObjects();
-        if (p->m_collisionLogLeft) p->m_collisionLogLeft->removeAllObjects();
-        if (p->m_collisionLogRight) p->m_collisionLogRight->removeAllObjects();
+        if (p->m_collisionLogLeft)   p->m_collisionLogLeft->removeAllObjects();
+        if (p->m_collisionLogRight)  p->m_collisionLogRight->removeAllObjects();
         p->m_playEffects = false;
 
         g_fakeDead = false;
@@ -263,8 +285,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_simulating = false;
         hideClone(p);
 
-        bool died = g_fakeDead || p->m_isDead;
-        if (!died && hit) {
+        bool ignore = isIgnoringDamage(this);
+        bool died = (!ignore) && (g_fakeDead || p->m_isDead);
+
+        if (!died && hit && !ignore) {
             if (touchKills(p) || !onGround(p)) died = true;
         }
         if (died) g_fakeDead = true;
@@ -339,18 +363,22 @@ class $modify(BufferLayer, GJBaseGameLayer) {
                 int life = trial(ev, heldPre, horizon);
                 bool full = life >= (wave ? horizon : NEED);
                 tried += full ? 'S' : 'x';
+
                 if (life > bestLife) {
                     bestLife = life;
                     bestT = t;
                 }
+
                 if (wave) {
                     if (life >= horizon) {
                         chosen = t;
                         break;
                     }
                 } else {
-                    bool wantGround = ev.down && cubeLike(g_fakeA);
-                    if (life >= NEED && (!wantGround || onGround(g_fakeA))) {
+                    // Cube / ship / ball / ufo / robot / spider / swing:
+                    // just accept the first delay that survives NEED ticks.
+                    // (Removed the old wantGround check that was killing cube.)
+                    if (life >= NEED) {
                         chosen = t;
                         break;
                     }
@@ -461,7 +489,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v10.0 LOADED (wave longest-survival, stage 32)");
+    log::info("[InputBuffer] v10.1 LOADED (cube fixed, noclip/ignore-damage support)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> 32/32 -> OFF");
     log::info("====================================================");

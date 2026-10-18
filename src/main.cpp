@@ -1,100 +1,112 @@
-/**
- * Include the Geode headers.
- */
 #include <Geode/Geode.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
 
-/**
- * Brings cocos2d and all Geode namespaces to the current scope.
- */
 using namespace geode::prelude;
 
-/**
- * `$modify` lets you extend and modify GD's classes.
- * To hook a function in Geode, simply $modify the class
- * and write a new function definition with the signature of
- * the function you want to hook.
- *
- * Here we use the overloaded `$modify` macro to set our own class name,
- * so that we can use it for button callbacks.
- *
- * Notice the header being included, you *must* include the header for
- * the class you are modifying, or you will get a compile error.
- *
- * Another way you could do this is like this:
- *
- * struct MyMenuLayer : Modify<MyMenuLayer, MenuLayer> {};
- */
-#include <Geode/modify/MenuLayer.hpp>
-class $modify(MyMenuLayer, MenuLayer) {
-	/**
-	 * Typically classes in GD are initialized using the `init` function, (though not always!),
-	 * so here we use it to add our own button to the bottom menu.
-	 *
-	 * Note that for all hooks, your signature has to *match exactly*,
-	 * `void init()` would not place a hook!
-	*/
-	bool init() {
-		/**
-		 * We call the original init function so that the
-		 * original class is properly initialized.
-		 */
-		if (!MenuLayer::init()) {
-			return false;
-		}
+struct Stage { int all; int wave; };
 
-		/**
-		 * You can use methods from the `geode::log` namespace to log messages to the console,
-		 * being useful for debugging and such. See this page for more info about logging:
-		 * https://docs.geode-sdk.org/tutorials/logging
-		*/
-		log::debug("Hello from my MenuLayer::init hook! This layer has {} children.", this->getChildrenCount());
+// Stage index: 0-3 presets, 4 = custom (from settings), 5 = OFF
+static constexpr int STAGE_CUSTOM = 4;
+static constexpr int STAGE_OFF = 5;
+static constexpr int STAGE_COUNT = 6;
 
-		/**
-		 * See this page for more info about buttons
-		 * https://docs.geode-sdk.org/tutorials/buttons
-		*/
-		auto myButton = CCMenuItemSpriteExtra::create(
-			CCSprite::createWithSpriteFrameName("GJ_likeBtn_001.png"),
-			this,
-			/**
-			 * Here we use the name we set earlier for our modify class.
-			*/
-			menu_selector(MyMenuLayer::onMyButton)
-		);
+static int  g_stage = 0;
+static int  g_pending[2] = {-1, -1};
+static bool g_replaying = false;
 
-		/**
-		 * Here we access the `bottom-menu` node by its ID, and add our button to it.
-		 * Node IDs are a Geode feature, see this page for more info about it:
-		 * https://docs.geode-sdk.org/tutorials/nodetree
-		*/
-		auto menu = this->getChildByID("bottom-menu");
-		menu->addChild(myButton);
+static Stage getStage(int i) {
+    switch (i) {
+        case 0: return {2, 2};
+        case 1: return {4, 4};
+        case 2: return {8, 8};
+        case 3: return {16, 8};
+        case STAGE_CUSTOM: return {
+            (int)Mod::get()->getSettingValue<int64_t>("custom-all"),
+            (int)Mod::get()->getSettingValue<int64_t>("custom-wave")
+        };
+        default: return {0, 0};
+    }
+}
 
-		/**
-		 * The `_spr` string literal operator just prefixes the string with
-		 * your mod id followed by a slash. This is good practice for setting your own node ids.
-		*/
-		myButton->setID("my-button"_spr);
+static std::string describe(int i) {
+    if (i == STAGE_OFF) return "OFF";
+    auto s = getStage(i);
+    auto name = i == STAGE_CUSTOM ? std::string("CUSTOM") : fmt::format("STAGE {}", i + 1);
+    float fa = s.all / 4.f, fw = s.wave / 4.f;
+    if (s.all == s.wave) {
+        return fmt::format("{}: {} Ticks All | {} Ticks Wave ({:.1f}f @ 60fps)", name, s.all, s.wave, fa);
+    }
+    return fmt::format("{}: {} Ticks All | {} Ticks Wave ({:.1f}f / {:.1f}f @ 60fps)", name, s.all, s.wave, fa, fw);
+}
 
-		/**
-		 * We update the layout of the menu to ensure that our button is properly placed.
-		 * This is yet another Geode feature, see this page for more info about it:
-		 * https://docs.geode-sdk.org/tutorials/layouts
-		*/
-		menu->updateLayout();
+class $modify(BufferLayer, GJBaseGameLayer) {
+    void handleButton(bool down, int button, bool isPlayer1) {
+        if (button != 1 || g_replaying || g_stage == STAGE_OFF) {
+            return GJBaseGameLayer::handleButton(down, button, isPlayer1);
+        }
 
-		/**
-		 * We return `true` to indicate that the class was properly initialized.
-		 */
-		return true;
-	}
+        int idx = isPlayer1 ? 0 : 1;
+        auto player = isPlayer1 ? m_player1 : m_player2;
+        auto s = getStage(g_stage);
+        int ticks = (player && player->m_isDart) ? s.wave : s.all;
 
-	/**
-	 * This is the callback function for the button we created earlier.
-	 * The signature for button callbacks must always be the same,
-	 * return type `void` and taking a `CCObject*`.
-	*/
-	void onMyButton(CCObject*) {
-		FLAlertLayer::create("Geode", "Hello from my custom mod!", "OK")->show();
-	}
+        if (ticks <= 0) {
+            return GJBaseGameLayer::handleButton(down, button, isPlayer1);
+        }
+
+        if (down) {
+            g_pending[idx] = -1;                 // new press cancels queued release
+            GJBaseGameLayer::handleButton(true, button, isPlayer1);
+        } else {
+            g_pending[idx] = ticks;              // delay the release
+        }
+    }
+
+    void processCommands(float dt) {
+        for (int i = 0; i < 2; i++) {
+            if (g_pending[i] < 0) continue;
+            if (--g_pending[i] <= 0) {
+                g_pending[i] = -1;
+                g_replaying = true;
+                GJBaseGameLayer::handleButton(false, 1, i == 0);
+                g_replaying = false;
+            }
+        }
+        GJBaseGameLayer::processCommands(dt);
+    }
+};
+
+class $modify(PlayLayer) {
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        g_stage = Mod::get()->getSavedValue<int>("stage", 0);
+        log::info("==============================================================");
+        log::info("[InputBuffer] v4.6 LOADED");
+        log::info("[InputBuffer] Starting Mode: {}", describe(g_stage));
+        log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> CUSTOM -> OFF");
+        log::info("==============================================================");
+        return true;
+    }
+
+    void resetLevel() {
+        g_pending[0] = g_pending[1] = -1;        // don't carry a queued release across deaths
+        PlayLayer::resetLevel();
+    }
+};
+
+class $modify(CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat) {
+        if (down && !repeat && key == KEY_F6 && PlayLayer::get()) {
+            g_stage = (g_stage + 1) % STAGE_COUNT;
+            Mod::get()->setSavedValue("stage", g_stage);
+            auto msg = describe(g_stage);
+            log::info("[InputBuffer] F6 Cycle -> {}", msg);
+            if (Mod::get()->getSettingValue<bool>("show-popup")) {
+                Notification::create(msg, NotificationIcon::None, 1.5f)->show();
+            }
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat);
+    }
 };

@@ -11,7 +11,7 @@
 
 using namespace geode::prelude;
 
-// 1 tick = 0.25 frame @ 60fps (240 TPS). update() takes frames, so a tick is 0.25, not 1/240.
+// 1 tick = 0.25 frame @ 60fps. PlayerObject::update takes frames, so one tick is 0.25.
 struct Stage { int all; int wave; const char* name; };
 static const Stage STAGES[] = {
     {2,  2, "STAGE 1"},
@@ -23,8 +23,9 @@ static const Stage STAGES[] = {
 static constexpr int STAGE_COUNT = 5;
 static int g_stage = 0;
 
-static constexpr int LOOKAHEAD = 24;
-static constexpr double MAX_DECISION_MS = 12.0;
+// How far past the click we look. Capped so the obstacle AFTER the gap doesn't poison the result.
+static constexpr int HORIZON_CAP = 16;
+static constexpr double MAX_DECISION_MS = 6.0;
 
 struct Ev { bool down; int button; bool p1; long fireTick; long madeTick; };
 
@@ -34,6 +35,7 @@ static long  g_tick = 0;
 static bool  g_fire = false;
 static bool  g_held = false;
 static bool  g_simulating = false;
+static bool  g_inFlip = false;
 static bool  g_fakeDead = false;
 static bool  g_hasPos = false;
 static float g_lastX = 0.f, g_lastY = 0.f, g_dx = 0.f, g_dy = 0.f;
@@ -131,10 +133,13 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
     bool isWave() { return m_player1->m_isDart || g_waveStreak >= 3; }
 
-    // Screen must not flip because a clone touched a portal.
     void flipGravity(PlayerObject* player, bool flip, bool noEffects) {
         if (g_simulating || isClone(player)) {
-            if (player) player->flipGravity(flip, true);
+            if (player && !g_inFlip) {
+                g_inFlip = true;
+                player->flipGravity(flip, true);
+                g_inFlip = false;
+            }
             return;
         }
         GJBaseGameLayer::flipGravity(player, flip, noEffects);
@@ -183,12 +188,28 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (p->m_waveTrail) p->m_waveTrail->setVisible(false);
     }
 
-    void fakeInput(PlayerObject* p, bool down) {
-        if (down) p->pushButton(PlayerButton::Jump);
-        else      p->releaseButton(PlayerButton::Jump);
+    // Sets the hold bit without a new press. A second pushButton would flip the wave twice.
+    void syncHold(PlayerObject* p, bool held) {
+        p->m_jumpBuffered = held;
+        p->m_holdingButtons[(int)PlayerButton::Jump] = held;
     }
 
-    // One real 240hz tick. Returns true if the clone dies on this tick.
+    void applyEdge(PlayerObject* p, bool& held, bool down) {
+        if (down == held) {
+            syncHold(p, held);
+            return;
+        }
+        if (down) {
+            p->m_holdingButtons[(int)PlayerButton::Jump] = false;
+            p->pushButton(PlayerButton::Jump);
+        } else {
+            p->m_holdingButtons[(int)PlayerButton::Jump] = true;
+            p->m_jumpBuffered = true;
+            p->releaseButton(PlayerButton::Jump);
+        }
+        held = down;
+    }
+
     bool stepFake(PlayerObject* p) {
         const float dt = 0.25f;
         if (p->m_collisionLogTop) p->m_collisionLogTop->removeAllObjects();
@@ -205,7 +226,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_simulating = false;
 
         p->setVisible(false);
-        if (p->m_waveTrail) p->m_waveTrail->setVisible(false);
         if (g_fakeDead || p->m_isDead || hit != 0) {
             g_fakeDead = true;
             return true;
@@ -213,19 +233,22 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         return false;
     }
 
-    bool trial(const Ev& ev, bool heldPre) {
+    // How many ticks the click survives, up to horizon.
+    int trial(const Ev& ev, bool heldPre, int horizon) {
         g_fakeB->loadFromCheckpoint(g_cpT);
         wake(g_fakeB);
-        fakeInput(g_fakeB, heldPre);
-        fakeInput(g_fakeB, ev.down);
-        for (int i = 0; i < LOOKAHEAD; i++) {
-            if (stepFake(g_fakeB)) return false;
+        bool held = heldPre;
+        applyEdge(g_fakeB, held, ev.down);
+        int lived = 0;
+        for (; lived < horizon; lived++) {
+            if (stepFake(g_fakeB)) return lived;
         }
-        return true;
+        return horizon;
     }
 
     void decide(Ev ev) {
         int limit = isWave() ? STAGES[g_stage].wave : STAGES[g_stage].all;
+        int horizon = std::min(HORIZON_CAP, std::max(8, limit + 4));
 
         if (!ensureFakes()) {
             log::info("[InputBuffer] could not create clone players, raw input");
@@ -245,12 +268,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (startDelay < 0) startDelay = 0;
 
         struct Flags { EnhancedGameObject* o; bool a; bool b; bool c; };
-        std::vector<Flags> saved;
-        float reach = (limit + LOOKAHEAD + 4) * std::max(g_dx, 1.f) + 120.f;
-        float px = m_player1->getPositionX();
-        for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+        static std::vector<Flags> saved;
+        saved.clear();
+        for (auto obj : m_activeObjects) {
             if (!obj) continue;
-            if (std::fabs(obj->getPositionX() - px) > reach) continue;
             auto eo = typeinfo_cast<EnhancedGameObject*>(obj);
             if (!eo) continue;
             saved.push_back({eo, eo->m_activated, eo->m_activatedByPlayer1, eo->m_activatedByPlayer2});
@@ -260,25 +281,27 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_fakeA->loadFromCheckpoint(g_cpReal);
         wake(g_fakeA);
         bool heldPre = g_held;
-        fakeInput(g_fakeA, heldPre);
+        syncHold(g_fakeA, heldPre);
 
-        int chosen = -1;
+        int bestT = -1;
+        int bestLife = -1;
         bool timedOut = false;
         std::string tried;
 
         for (int t = 0; t <= limit; t++) {
             for (auto& q : g_q) {
-                if (q.fireTick - g_tick == t) {
-                    fakeInput(g_fakeA, q.down);
-                    heldPre = q.down;
-                }
+                if (q.fireTick - g_tick == t) applyEdge(g_fakeA, heldPre, q.down);
             }
 
             if (t >= startDelay) {
                 g_fakeA->saveToCheckpoint(g_cpT);
-                bool ok = trial(ev, heldPre);
-                tried += ok ? 'S' : 'x';
-                if (ok) { chosen = t; break; }
+                int life = trial(ev, heldPre, horizon);
+                tried += (life >= horizon) ? 'S' : 'x';
+                if (life > bestLife) {
+                    bestLife = life;
+                    bestT = t;
+                }
+                if (life >= horizon) break;
             }
 
             if (stepFake(g_fakeA)) { tried += '!'; break; }
@@ -292,26 +315,28 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         }
         g_simulating = false;
 
-        log::info("[InputBuffer] SIM {} mode={} limit={} delays: {} ({:.1f} ms){}",
+        log::info("[InputBuffer] SIM {} mode={} limit={} delays: {} pick={} lived={}/{} ({:.1f} ms){}",
                   ev.down ? "PRESS" : "RELEASE", isWave() ? "WAVE" : "OTHER", limit,
-                  tried, ms(), timedOut ? " TIMEOUT" : "");
+                  tried, bestT, std::max(0, bestLife), horizon, ms(), timedOut ? " TIMEOUT" : "");
 
-        if (chosen == 0 && startDelay == 0) {
+        if (bestT < 0) {
+            if (startDelay == 0) applyNow(ev.down, ev.button, ev.p1);
+            else {
+                ev.madeTick = g_tick;
+                ev.fireTick = g_tick + startDelay;
+                g_q.push_back(ev);
+            }
+            return;
+        }
+        if (bestT == 0 && startDelay == 0) {
             applyNow(ev.down, ev.button, ev.p1);
             return;
         }
-        if (chosen < 0) {
-            if (startDelay == 0) {
-                applyNow(ev.down, ev.button, ev.p1);
-                return;
-            }
-            chosen = startDelay;
-        }
         ev.madeTick = g_tick;
-        ev.fireTick = g_tick + chosen;
+        ev.fireTick = g_tick + bestT;
         g_q.push_back(ev);
         log::info("[InputBuffer] BUFFERED {} @ tick {} -> fires in {} ticks",
-                  ev.down ? "PRESS" : "RELEASE", g_tick, chosen);
+                  ev.down ? "PRESS" : "RELEASE", g_tick, bestT);
     }
 
     void flushAllRaw() {
@@ -358,7 +383,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_waveStreak = clean ? g_waveStreak + 1 : 0;
     }
 
-    // Queue the click BEFORE vanilla processQueuedButtons, or it misses this tick.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (!isHalfTick) {
             g_tick++;
@@ -380,7 +404,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v7.0 LOADED (clone trajectory, click queued before physics)");
+    log::info("[InputBuffer] v8.0 LOADED (earliest longest-survival buffer)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF");
     log::info("====================================================");

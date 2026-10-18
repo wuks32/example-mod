@@ -7,7 +7,6 @@ using namespace geode::prelude;
 
 struct Stage { int all; int wave; };
 
-// Stage index: 0-3 presets, 4 = custom (from settings), 5 = OFF
 static constexpr int STAGE_CUSTOM = 4;
 static constexpr int STAGE_OFF = 5;
 static constexpr int STAGE_COUNT = 6;
@@ -43,6 +42,9 @@ static std::string describe(int i) {
 
 class $modify(BufferLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
+        log::info("[InputBuffer] handleButton down={} button={} p1={} replaying={} stage={}",
+                  down, button, isPlayer1, g_replaying, g_stage);
+
         if (button != 1 || g_replaying || g_stage == STAGE_OFF) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
@@ -57,10 +59,11 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         }
 
         if (down) {
-            g_pending[idx] = -1;                 // new press cancels queued release
+            g_pending[idx] = -1;
             GJBaseGameLayer::handleButton(true, button, isPlayer1);
         } else {
-            g_pending[idx] = ticks;              // delay the release
+            log::info("[InputBuffer] release delayed by {} ticks", ticks);
+            g_pending[idx] = ticks;
         }
     }
 
@@ -69,6 +72,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             if (g_pending[i] < 0) continue;
             if (--g_pending[i] <= 0) {
                 g_pending[i] = -1;
+                log::info("[InputBuffer] firing delayed release p{}", i + 1);
                 g_replaying = true;
                 GJBaseGameLayer::handleButton(false, 1, i == 0);
                 g_replaying = false;
@@ -82,6 +86,7 @@ class $modify(PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         g_stage = Mod::get()->getSavedValue<int>("stage", 0);
+        g_pending[0] = g_pending[1] = -1;
         log::info("==============================================================");
         log::info("[InputBuffer] v4.6 LOADED");
         log::info("[InputBuffer] Starting Mode: {}", describe(g_stage));
@@ -91,7 +96,7 @@ class $modify(PlayLayer) {
     }
 
     void resetLevel() {
-        g_pending[0] = g_pending[1] = -1;        // don't carry a queued release across deaths
+        g_pending[0] = g_pending[1] = -1;
         PlayLayer::resetLevel();
     }
 };

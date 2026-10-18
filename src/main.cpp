@@ -73,7 +73,6 @@ class $modify(BufferPlay, PlayLayer) {
             g_fakeDead = true;      // clone died: record it, never really die
             return;
         }
-        log::info("[InputBuffer] DBG REAL DEATH at tick {}", g_tick);
         PlayLayer::destroyPlayer(player, obj);
     }
 
@@ -150,30 +149,28 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     }
 
     void stepFake(PlayerObject* p) {
-        const float dt = 1.f / 240.f;
+        // update() takes frames. 0.25 = one 240hz tick (1/4 of a 60fps frame).
+        const float dt = 0.25f;
+        if (p->m_collisionLogTop) p->m_collisionLogTop->removeAllObjects();
+        if (p->m_collisionLogBottom) p->m_collisionLogBottom->removeAllObjects();
+        if (p->m_collisionLogLeft) p->m_collisionLogLeft->removeAllObjects();
+        if (p->m_collisionLogRight) p->m_collisionLogRight->removeAllObjects();
+        p->m_playEffects = false;
         p->update(dt);
-        GJBaseGameLayer::checkCollisions(p, dt, false);
+        if (GJBaseGameLayer::checkCollisions(p, dt, true)) g_fakeDead = true;
     }
 
     // Clone B: restore tick-t state, press/release, run forward, survive?
     bool trial(const Ev& ev, bool heldPre) {
         g_fakeB->loadFromCheckpoint(g_cpT);
-        CCPoint s = g_fakeB->getPosition();
         fakeInput(g_fakeB, heldPre);
         fakeInput(g_fakeB, ev.down);
-        bool ok = true;
-        int steps = 0;
-        for (; steps < LOOKAHEAD; steps++) {
+        for (int i = 0; i < LOOKAHEAD; i++) {
             g_fakeDead = false;
             stepFake(g_fakeB);
-            if (g_fakeDead) { ok = false; break; }
+            if (g_fakeDead) return false;
         }
-        CCPoint e = g_fakeB->getPosition();
-        CCPoint r = m_player1->getPosition();
-        log::info("[InputBuffer] DBG real=({:.1f},{:.1f}) cloneStart=({:.1f},{:.1f}) "
-                  "cloneEnd=({:.1f},{:.1f}) steps={} survived={}",
-                  r.x, r.y, s.x, s.y, e.x, e.y, steps, ok);
-        return ok;
+        return true;
     }
 
     void decide(Ev ev) {
@@ -196,7 +193,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         int startDelay = (int)(minTick - g_tick);
 
         // Snapshot orb/pad "already used" flags: the clones must not use them up.
-    struct Flags { EnhancedGameObject* o; bool a; bool b; bool c; };
+        struct Flags { EnhancedGameObject* o; bool a; bool b; bool c; };
         std::vector<Flags> saved;
         float reach = (limit + LOOKAHEAD + 4) * std::max(g_dx, 1.f) + 120.f;
         float px = m_player1->getPositionX();

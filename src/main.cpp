@@ -187,14 +187,16 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         int startDelay = (int)(minTick - g_tick);
 
         // Snapshot orb/pad "already used" flags: the clones must not use them up.
-        struct Flags { GameObject* o; bool a; bool b; };
+    struct Flags { EnhancedGameObject* o; bool a; bool b; bool c; };
         std::vector<Flags> saved;
         float reach = (limit + LOOKAHEAD + 4) * std::max(g_dx, 1.f) + 120.f;
         float px = m_player1->getPositionX();
         for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
             if (!obj) continue;
             if (std::fabs(obj->getPositionX() - px) > reach) continue;
-            saved.push_back({obj, obj->m_hasBeenActivated, obj->m_hasBeenActivatedP2});
+            auto eo = typeinfo_cast<EnhancedGameObject*>(obj);
+            if (!eo) continue;
+            saved.push_back({eo, eo->m_activated, eo->m_activatedByPlayer1, eo->m_activatedByPlayer2});
         }
 
         // Clone A = real player, runs with no new input.
@@ -230,8 +232,9 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         }
 
         for (auto& f : saved) {                         // put orbs/pads back
-            f.o->m_hasBeenActivated = f.a;
-            f.o->m_hasBeenActivatedP2 = f.b;
+            f.o->m_activated = f.a;
+            f.o->m_activatedByPlayer1 = f.b;
+            f.o->m_activatedByPlayer2 = f.c;
         }
 
         log::info("[InputBuffer] SIM {} mode={} limit={} delays: {} ({:.1f} ms){}",

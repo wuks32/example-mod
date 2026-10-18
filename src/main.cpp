@@ -11,7 +11,6 @@
 
 using namespace geode::prelude;
 
-// 1 tick = 0.25 frame @ 60fps. PlayerObject::update takes frames, so one tick is 0.25.
 struct Stage { int all; int wave; const char* name; };
 static const Stage STAGES[] = {
     {2,  2, "STAGE 1"},
@@ -23,8 +22,8 @@ static const Stage STAGES[] = {
 static constexpr int STAGE_COUNT = 5;
 static int g_stage = 0;
 
-// How far past the click we look. Capped so the obstacle AFTER the gap doesn't poison the result.
-static constexpr int HORIZON_CAP = 16;
+// Survive this many ticks and the click is good enough. Don't wait for a later, "safer" one.
+static constexpr int NEED = 4;
 static constexpr double MAX_DECISION_MS = 6.0;
 
 struct Ev { bool down; int button; bool p1; long fireTick; long madeTick; };
@@ -58,6 +57,33 @@ static std::string stageText(const Stage& s) {
         ? fmt::format("{:.1f}f @ 60fps", a)
         : fmt::format("{:.1f}f / {:.1f}f @ 60fps", a, w);
     return fmt::format("{}: {} Ticks All | {} Ticks Wave ({})", s.name, s.all, s.wave, fr);
+}
+
+static const char* modeName(PlayerObject* p) {
+    if (!p) return "NONE";
+    if (p->m_isDart) return "WAVE";
+    if (p->m_isShip) return "SHIP";
+    if (p->m_isBird) return "UFO";
+    if (p->m_isBall) return "BALL";
+    if (p->m_isRobot) return "ROBOT";
+    if (p->m_isSpider) return "SPIDER";
+    if (p->m_isSwing) return "SWING";
+    return "CUBE";
+}
+
+// Cube and robot jump off a surface. Everyone else acts on the press itself.
+static bool cubeLike(PlayerObject* p) {
+    return p && !p->m_isShip && !p->m_isBall && !p->m_isBird && !p->m_isDart
+        && !p->m_isSpider && !p->m_isSwing;
+}
+
+static bool onGround(PlayerObject* p) {
+    return p->m_isOnGround || p->m_isOnGround2 || p->m_isOnGround3 || p->m_isOnGround4 || p->m_isOnSlope;
+}
+
+// Wave, ship, ufo and swing die when they touch a solid. Cube and ball do not.
+static bool touchKills(PlayerObject* p) {
+    return p->m_isDart || p->m_isShip || p->m_isBird || p->m_isSwing;
 }
 
 static void dropFakes() {
@@ -178,17 +204,31 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         return g_fakeA && g_fakeB && g_cpReal && g_cpT;
     }
 
+    void hush(PlayerObject* p) {
+        if (!p) return;
+        p->setVisible(false);
+        p->setOpacity(0);
+        p->m_playEffects = false;
+        p->m_isHidden = true;
+        if (p->m_waveTrail) p->m_waveTrail->setVisible(false);
+        if (p->m_regularTrail) p->m_regularTrail->setVisible(false);
+        if (p->m_shipStreak) p->m_shipStreak->setVisible(false);
+    }
+
+    void bury(PlayerObject* p) {
+        if (!p) return;
+        hush(p);
+        p->stopParticles();
+        p->setPosition({-100000.f, -100000.f});
+    }
+
     void wake(PlayerObject* p) {
         if (!p) return;
         p->m_isDead = false;
-        p->m_playEffects = false;
         p->m_ignoreDamage = false;
-        p->setVisible(false);
-        p->setOpacity(0);
-        if (p->m_waveTrail) p->m_waveTrail->setVisible(false);
+        hush(p);
     }
 
-    // Sets the hold bit without a new press. A second pushButton would flip the wave twice.
     void syncHold(PlayerObject* p, bool held) {
         p->m_jumpBuffered = held;
         p->m_holdingButtons[(int)PlayerButton::Jump] = held;
@@ -216,24 +256,23 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (p->m_collisionLogBottom) p->m_collisionLogBottom->removeAllObjects();
         if (p->m_collisionLogLeft) p->m_collisionLogLeft->removeAllObjects();
         if (p->m_collisionLogRight) p->m_collisionLogRight->removeAllObjects();
-        p->m_playEffects = false;
-        p->setVisible(false);
+        hush(p);
 
         g_fakeDead = false;
         g_simulating = true;
         p->update(dt);
         int hit = GJBaseGameLayer::checkCollisions(p, dt, false);
         g_simulating = false;
+        hush(p);
 
-        p->setVisible(false);
-        if (g_fakeDead || p->m_isDead || hit != 0) {
-            g_fakeDead = true;
-            return true;
+        bool died = g_fakeDead || p->m_isDead;
+        if (!died && hit) {
+            if (touchKills(p) || !onGround(p)) died = true;
         }
-        return false;
+        if (died) g_fakeDead = true;
+        return died;
     }
 
-    // How many ticks the click survives, up to horizon.
     int trial(const Ev& ev, bool heldPre, int horizon) {
         g_fakeB->loadFromCheckpoint(g_cpT);
         wake(g_fakeB);
@@ -248,7 +287,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
     void decide(Ev ev) {
         int limit = isWave() ? STAGES[g_stage].wave : STAGES[g_stage].all;
-        int horizon = std::min(HORIZON_CAP, std::max(8, limit + 4));
+        int horizon = std::min(12, std::max(8, limit + 4));
 
         if (!ensureFakes()) {
             log::info("[InputBuffer] could not create clone players, raw input");
@@ -285,6 +324,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
         int bestT = -1;
         int bestLife = -1;
+        int chosen = -1;
         bool timedOut = false;
         std::string tried;
 
@@ -296,12 +336,17 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             if (t >= startDelay) {
                 g_fakeA->saveToCheckpoint(g_cpT);
                 int life = trial(ev, heldPre, horizon);
-                tried += (life >= horizon) ? 'S' : 'x';
+                tried += (life >= NEED) ? 'S' : 'x';
                 if (life > bestLife) {
                     bestLife = life;
                     bestT = t;
                 }
-                if (life >= horizon) break;
+                // Cube/robot: an air click is not the click. Wait for the surface.
+                bool wantGround = ev.down && cubeLike(g_fakeA);
+                if (life >= NEED && (!wantGround || onGround(g_fakeA))) {
+                    chosen = t;
+                    break;
+                }
             }
 
             if (stepFake(g_fakeA)) { tried += '!'; break; }
@@ -314,12 +359,16 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             f.o->m_activatedByPlayer2 = f.c;
         }
         g_simulating = false;
+        bury(g_fakeA);
+        bury(g_fakeB);
+
+        if (chosen < 0) chosen = bestT;
 
         log::info("[InputBuffer] SIM {} mode={} limit={} delays: {} pick={} lived={}/{} ({:.1f} ms){}",
-                  ev.down ? "PRESS" : "RELEASE", isWave() ? "WAVE" : "OTHER", limit,
-                  tried, bestT, std::max(0, bestLife), horizon, ms(), timedOut ? " TIMEOUT" : "");
+                  ev.down ? "PRESS" : "RELEASE", modeName(m_player1), limit,
+                  tried, chosen, std::max(0, bestLife), horizon, ms(), timedOut ? " TIMEOUT" : "");
 
-        if (bestT < 0) {
+        if (chosen < 0) {
             if (startDelay == 0) applyNow(ev.down, ev.button, ev.p1);
             else {
                 ev.madeTick = g_tick;
@@ -328,15 +377,15 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
             return;
         }
-        if (bestT == 0 && startDelay == 0) {
+        if (chosen == 0 && startDelay == 0) {
             applyNow(ev.down, ev.button, ev.p1);
             return;
         }
         ev.madeTick = g_tick;
-        ev.fireTick = g_tick + bestT;
+        ev.fireTick = g_tick + chosen;
         g_q.push_back(ev);
         log::info("[InputBuffer] BUFFERED {} @ tick {} -> fires in {} ticks",
-                  ev.down ? "PRESS" : "RELEASE", g_tick, bestT);
+                  ev.down ? "PRESS" : "RELEASE", g_tick, chosen);
     }
 
     void flushAllRaw() {
@@ -404,7 +453,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v8.0 LOADED (earliest longest-survival buffer)");
+    log::info("[InputBuffer] v9.0 LOADED (short delay, all modes, hidden clones)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF");
     log::info("====================================================");

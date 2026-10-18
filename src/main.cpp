@@ -19,7 +19,7 @@ static const Stage STAGES[] = {
     {0,  0, "STAGE 5"},
 };
 static constexpr int STAGE_COUNT = 5;
-static int g_stage = 0;   // starts on STAGE 1 like the original
+static int g_stage = 0;
 
 static std::string stageText(const Stage& s) {
     if (s.all == 0) return fmt::format("{}: OFF (100% Raw Input)", s.name);
@@ -30,21 +30,21 @@ static std::string stageText(const Stage& s) {
     return fmt::format("{}: {} Ticks All | {} Ticks Wave ({})", s.name, s.all, s.wave, fr);
 }
 
-// How many ticks ahead we check the wave path.
 static constexpr int LOOKAHEAD = 10;
 
 // ---------- Shared state ----------
 struct Ev   { bool down; int button; bool p1; long fireTick; long madeTick; };
 struct Land { int button; bool p1; long startTick; int limit; bool releaseQueued; };
 
-static std::vector<Ev>   g_in;    // inputs caught this tick, waiting for a decision
-static std::vector<Ev>   g_q;     // wave inputs delayed to a later tick (kept in fire order)
-static std::vector<Land> g_land;  // non-wave clicks waiting to land
+static std::vector<Ev>   g_in;
+static std::vector<Ev>   g_q;
+static std::vector<Land> g_land;
 static long  g_tick = 0;
-static bool  g_fire = false;      // we are applying an input ourselves
-static bool  g_held = false;      // is player 1's jump button currently held (as applied)
-static float g_lastX = 0.f;
-static float g_dx = 0.f;          // measured x movement per tick
+static bool  g_fire = false;
+static bool  g_held = false;
+static float g_lastX = 0.f, g_lastY = 0.f;
+static float g_dx = 0.f, g_dy = 0.f;
+static int   g_waveStreak = 0;     // consecutive ticks moving in a clean wave line
 
 // ---------- F6 cycling ----------
 class $modify(BufferKeys, CCKeyboardDispatcher) {
@@ -61,13 +61,10 @@ class $modify(BufferKeys, CCKeyboardDispatcher) {
 class $modify(BufferPlay, PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
-        g_in.clear();
-        g_q.clear();
-        g_land.clear();
-        g_tick = 0;
-        g_held = false;
-        g_lastX = 0.f;
-        g_dx = 0.f;
+        g_in.clear(); g_q.clear(); g_land.clear();
+        g_tick = 0; g_held = false;
+        g_lastX = g_lastY = 0.f; g_dx = g_dy = 0.f;
+        g_waveStreak = 0;
     }
 };
 
@@ -82,6 +79,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         return true;
     }
 
+    bool isWave() {
+        return m_player1->m_isDart || g_waveStreak >= 3;
+    }
+
     void applyNow(bool down, int button, bool p1) {
         g_fire = true;
         GJBaseGameLayer::handleButton(down, button, p1);
@@ -89,7 +90,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (button == 1 && p1) g_held = down;
     }
 
-    // Only catches the input. No heavy work here (game is mid input-loop).
     void handleButton(bool down, int button, bool isPlayer1) {
         if (g_fire || button != 1 || !isPlayer1 || !bufferActive()) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
@@ -99,17 +99,16 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_in.push_back({down, button, isPlayer1, g_tick, g_tick});
     }
 
-    // ---------- WAVE: trace the straight path, pick earliest safe delay ----------
+    // ---------- WAVE ----------
     void decideWave(Ev ev) {
         int limit = STAGES[g_stage].wave;
         CCPoint p = m_player1->getPosition();
         float dx = g_dx > 0.01f ? g_dx : (m_player1->m_playerSpeed * 346.2f / 240.f);
         float size = m_player1->m_vehicleSize > 0.f ? m_player1->m_vehicleSize : 1.f;
-        float slope = size < 1.f ? 2.f : 1.f;       // mini wave is steeper
-        float half = 4.5f * size;                   // wave hitbox half-size
+        float slope = size < 1.f ? 2.f : 1.f;
+        float half = 4.5f * size;
         bool upsideDown = m_player1->m_isUpsideDown;
 
-        // Gather nearby solids and hazards once (no game stepping).
         float reachX = dx * (limit + LOOKAHEAD + 2) + 60.f;
         float reachY = reachX * slope + 60.f;
         std::vector<CCRect> boxes;
@@ -145,18 +144,21 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         };
 
         int chosen = -1;
+        std::string tried;
         for (int d = startDelay; d <= limit; d++) {
-            if (pathSafe(d)) { chosen = d; break; }
+            bool ok = pathSafe(d);
+            tried += ok ? "S" : "x";
+            if (ok) { chosen = d; break; }
         }
+        log::info("[InputBuffer] WAVE {} dx={:.2f} boxes={} delays tried: {}",
+                  ev.down ? "PRESS" : "RELEASE", dx, boxes.size(), tried);
 
-        if (chosen == 0 && startDelay == 0) {          // already safe: untouched input
+        if (chosen == 0 && startDelay == 0) {
             applyNow(ev.down, ev.button, ev.p1);
             return;
         }
-        if (chosen < 0) {                               // nothing safe: send raw
+        if (chosen < 0) {
             if (startDelay == 0) {
-                log::info("[InputBuffer] {} @ tick {}: no safe delay within {} ticks, raw",
-                          ev.down ? "PRESS" : "RELEASE", g_tick, limit);
                 applyNow(ev.down, ev.button, ev.p1);
                 return;
             }
@@ -168,9 +170,17 @@ class $modify(BufferLayer, GJBaseGameLayer) {
                   ev.down ? "PRESS" : "RELEASE", g_tick, chosen);
     }
 
-    // ---------- ALL OTHER MODES: hold the click until you land ----------
+    // ---------- Modes that can land (cube, robot, spider, ball) ----------
     void decideGround(Ev ev) {
         int limit = STAGES[g_stage].all;
+
+        // Ship / UFO / swing never "land": no landing buffer for them.
+        bool canLand = !(m_player1->m_isShip || m_player1->m_isBird || m_player1->m_isSwing);
+        if (!canLand) {
+            applyNow(ev.down, ev.button, ev.p1);
+            return;
+        }
+
         if (!ev.down) {
             for (auto& l : g_land)
                 if (l.button == ev.button && l.p1 == ev.p1) { l.releaseQueued = true; return; }
@@ -198,28 +208,39 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
         g_tick++;
         if (m_player1) {
-            float x = m_player1->getPositionX();
-            g_dx = x - g_lastX;
-            g_lastX = x;
+            CCPoint pos = m_player1->getPosition();
+            g_dx = pos.x - g_lastX;
+            g_dy = pos.y - g_lastY;
+            g_lastX = pos.x;
+            g_lastY = pos.y;
+
+            // Wave-like movement: constant 45 deg (or mini ~63 deg) line.
+            bool clean = false;
+            if (g_dx > 0.01f) {
+                float r = std::fabs(g_dy) / g_dx;
+                clean = (std::fabs(r - 1.f) < 0.03f) || (std::fabs(r - 2.f) < 0.05f);
+            }
+            g_waveStreak = clean ? g_waveStreak + 1 : 0;
         }
 
-        if (!bufferActive()) {          // never drop inputs when switching off
+        if (!bufferActive()) {
             if (!g_in.empty() || !g_q.empty() || !g_land.empty()) flushAllRaw();
             return;
         }
 
-        // 1) Decide freshly caught inputs.
         if (!g_in.empty()) {
             std::vector<Ev> work;
             work.swap(g_in);
-            bool wave = m_player1->m_isDart;
+            bool wave = isWave();
+            log::info("[InputBuffer] click: mode={} isDart={} streak={} onGround={}",
+                      wave ? "WAVE" : "OTHER", m_player1->m_isDart,
+                      g_waveStreak, m_player1->m_isOnGround);
             for (auto& ev : work) {
                 if (wave) decideWave(ev);
                 else      decideGround(ev);
             }
         }
 
-        // 2) Fire delayed wave inputs whose time has come.
         for (auto it = g_q.begin(); it != g_q.end();) {
             if (it->fireTick <= g_tick) {
                 applyNow(it->down, it->button, it->p1);
@@ -232,7 +253,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             } else ++it;
         }
 
-        // 3) Fire click-until-landing inputs.
         for (auto it = g_land.begin(); it != g_land.end();) {
             PlayerObject* pl = it->p1 ? m_player1 : m_player2;
             long elapsed = g_tick - it->startTick;
@@ -256,7 +276,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v5.2 LOADED (cheap wave path check, no simulation)");
+    log::info("[InputBuffer] v5.3 LOADED (wave detection fix)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF");
     log::info("====================================================");

@@ -192,15 +192,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
     bool isWave() { return m_player1 && (m_player1->m_isDart || g_waveStreak >= 3); }
 
-    void playerTookDamage(PlayerObject* player) {
-        if (g_simulating || isClone(player)) {
-            g_fakeDead = true;
-            if (player) player->m_isDead = true;
-            return;
-        }
-        GJBaseGameLayer::playerTookDamage(player);
-    }
-
     void flipGravity(PlayerObject* player, bool flip, bool noEffects) {
         if (g_simulating || isClone(player)) {
             if (player && !g_inFlip) {
@@ -393,7 +384,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         applyEdge(g_fakeB, held, ev.down);
         int lived = 0;
         for (; lived < horizon; lived++) {
-            // Don't glue the jumped cube to the floor. Do keep a running approach honest.
             if (stepFake(g_fakeB, false)) return lived;
         }
         return horizon;
@@ -463,9 +453,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
 
             if (t >= startDelay) {
-                // Same rule as the wave: a click in the air is not a jump.
-                // Hold it until the cube is on the ground, then take the first
-                // timing that still hasn't hit anything when it lands.
                 bool jumpable = !cubePress || onGround(g_fakeA);
                 if (jumpable) {
                     g_fakeA->saveToCheckpoint(g_cpT);
@@ -605,7 +592,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v10.5 LOADED (cube holds the click like wave)");
+    log::info("[InputBuffer] v10.6 LOADED (cube holds the click like wave)");
     log::info("[InputBuffer] Starting Mode: STAGE 1. F6 cycles. Stage 6 is OFF.");
     log::info("====================================================");
 }

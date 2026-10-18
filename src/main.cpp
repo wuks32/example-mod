@@ -43,6 +43,8 @@ static std::string describe(int i) {
 
 class $modify(BufferLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
+        Notification::create(fmt::format("{} b={} p1={}", down ? "PRESS" : "RELEASE", button, isPlayer1), NotificationIcon::None, 0.4f)->show();
+
         if (button != 1 || g_replaying || g_stage == STAGE_OFF) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
@@ -79,6 +81,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
                 g_pending[i] = -1.f;
                 log::info("[InputBuffer] firing delayed release p{}", i + 1);
                 g_replaying = true;
+                Notification::create("DELAYED RELEASE FIRED", NotificationIcon::None, 0.4f)->show();
                 GJBaseGameLayer::handleButton(false, 1, i == 0);
                 g_replaying = false;
             }

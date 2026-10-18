@@ -66,7 +66,6 @@ static bool isIgnoringDamage(GJBaseGameLayer* layer) {
     if (!layer) return false;
     if (auto* p = layer->m_player1; p && p->m_ignoreDamage) return true;
     if (auto* pl = PlayLayer::get()) {
-        // covers built-in playtest Ignore Damage + many noclip mods
         if (pl->m_ignoreDamage || pl->m_isIgnoreDamageEnabled) return true;
     }
     return false;
@@ -99,7 +98,13 @@ static bool cubeLike(PlayerObject* p) {
 }
 
 static bool onGround(PlayerObject* p) {
-    return p->m_isOnGround || p->m_isOnGround2 || p->m_isOnGround3 || p->m_isOnGround4 || p->m_isOnSlope;
+    return p && (p->m_isOnGround || p->m_isOnGround2 || p->m_isOnGround3 ||
+                 p->m_isOnGround4 || p->m_isOnSlope);
+}
+
+static bool canJump(PlayerObject* p) {
+    if (!p || p->m_isDead) return false;
+    return onGround(p);
 }
 
 static bool touchKills(PlayerObject* p) {
@@ -143,7 +148,6 @@ class $modify(BufferPlayer, PlayerObject) {
 class $modify(BufferPlay, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
         if (g_simulating || isClone(player)) {
-            // only mark fake-dead when we are actually simulating deaths
             if (!isIgnoringDamage(this)) g_fakeDead = true;
             return;
         }
@@ -249,6 +253,17 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         p->m_playEffects = false;
     }
 
+    // Copy live ground / collision state from the real player.
+    // Checkpoints do not reliably restore these runtime flags.
+    void syncGroundState(PlayerObject* dst, PlayerObject* src) {
+        if (!dst || !src) return;
+        dst->m_isOnGround  = src->m_isOnGround;
+        dst->m_isOnGround2 = src->m_isOnGround2;
+        dst->m_isOnGround3 = src->m_isOnGround3;
+        dst->m_isOnGround4 = src->m_isOnGround4;
+        dst->m_isOnSlope   = src->m_isOnSlope;
+    }
+
     void syncHold(PlayerObject* p, bool held) {
         p->m_jumpBuffered = held;
         p->m_holdingButtons[(int)PlayerButton::Jump] = held;
@@ -298,6 +313,8 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     int trial(const Ev& ev, bool heldPre, int horizon) {
         g_fakeB->loadFromCheckpoint(g_cpT);
         wake(g_fakeB);
+        // Keep ground state consistent with the moment we decided to try the input
+        syncGroundState(g_fakeB, g_fakeA);
         bool held = heldPre;
         applyEdge(g_fakeB, held, ev.down);
         int lived = 0;
@@ -310,7 +327,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     void decide(Ev ev) {
         bool wave = isWave();
         int limit = wave ? STAGES[g_stage].wave : STAGES[g_stage].all;
-        // Wave looks further and keeps the click that survives the longest.
         int horizon = wave ? std::min(16, std::max(8, limit + 4))
                            : std::min(12, std::max(8, limit + 4));
 
@@ -344,6 +360,8 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         m_player1->saveToCheckpoint(g_cpReal);
         g_fakeA->loadFromCheckpoint(g_cpReal);
         wake(g_fakeA);
+        // CRITICAL for cube: restore live ground flags (checkpoint does not)
+        syncGroundState(g_fakeA, m_player1);
         bool heldPre = g_held;
         syncHold(g_fakeA, heldPre);
 
@@ -375,10 +393,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
                         break;
                     }
                 } else {
-                    // Cube / ship / ball / ufo / robot / spider / swing:
-                    // just accept the first delay that survives NEED ticks.
-                    // (Removed the old wantGround check that was killing cube.)
-                    if (life >= NEED) {
+                    // Cube-like press: only accept when we are actually on the ground
+                    // (i.e. “hold until it’s good to jump”). Other modes just need survival.
+                    bool isCubePress = ev.down && cubeLike(g_fakeA);
+                    if (life >= NEED && (!isCubePress || canJump(g_fakeA))) {
                         chosen = t;
                         break;
                     }
@@ -489,7 +507,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v10.1 LOADED (cube fixed, noclip/ignore-damage support)");
+    log::info("[InputBuffer] v10.2 LOADED (cube hold-until-jump + noclip)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> 32/32 -> OFF");
     log::info("====================================================");

@@ -28,9 +28,11 @@ static const Stage STAGES[] = {
 static constexpr int STAGE_COUNT = 6;
 static int g_stage = 0;
 
-// Other modes accept a click once it survives this many ticks. Wave does not.
+// Ship / ball / ufo / robot / spider / swing: accept once this many sim steps are clean.
+// Cube and wave do not. They keep the timing that survives the whole look-ahead,
+// which is what lets an early cube click wait until it clears a set of spikes.
 static constexpr int NEED = 4;
-static constexpr double MAX_DECISION_MS = 6.0;
+static constexpr double MAX_DECISION_MS = 8.0;
 
 struct Ev {
     bool down;
@@ -62,15 +64,6 @@ static bool isClone(PlayerObject* p) {
     return p && (p == g_fakeA || p == g_fakeB);
 }
 
-static bool isIgnoringDamage(GJBaseGameLayer* layer) {
-    if (!layer) return false;
-    if (auto* p = layer->m_player1; p && p->m_ignoreDamage) return true;
-    if (auto* pl = PlayLayer::get()) {
-        if (pl->m_ignoreDamage || pl->m_isIgnoreDamageEnabled) return true;
-    }
-    return false;
-}
-
 static std::string stageText(const Stage& s) {
     if (s.all == 0) return fmt::format("{}: OFF (100% Raw Input)", s.name);
     float a = s.all / 4.f, w = s.wave / 4.f;
@@ -92,6 +85,7 @@ static const char* modeName(PlayerObject* p) {
     return "CUBE";
 }
 
+// Cube and robot jump off the floor. Everything else is "hold and steer".
 static bool cubeLike(PlayerObject* p) {
     return p && !p->m_isShip && !p->m_isBall && !p->m_isBird && !p->m_isDart
         && !p->m_isSpider && !p->m_isSwing;
@@ -100,15 +94,6 @@ static bool cubeLike(PlayerObject* p) {
 static bool onGround(PlayerObject* p) {
     return p && (p->m_isOnGround || p->m_isOnGround2 || p->m_isOnGround3 ||
                  p->m_isOnGround4 || p->m_isOnSlope);
-}
-
-static bool canJump(PlayerObject* p) {
-    if (!p || p->m_isDead) return false;
-    return onGround(p);
-}
-
-static bool touchKills(PlayerObject* p) {
-    return p->m_isDart || p->m_isShip || p->m_isBird || p->m_isSwing;
 }
 
 static void dropFakes() {
@@ -132,7 +117,7 @@ class $modify(BufferKeys, CCKeyboardDispatcher) {
 class $modify(BufferPlayer, PlayerObject) {
     void playerDestroyed(bool noEffects) {
         if (g_simulating || isClone(this)) {
-            if (!isIgnoringDamage(this->m_gameLayer)) g_fakeDead = true;
+            g_fakeDead = true;
             this->m_isDead = true;
             return;
         }
@@ -148,7 +133,7 @@ class $modify(BufferPlayer, PlayerObject) {
 class $modify(BufferPlay, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
         if (g_simulating || isClone(player)) {
-            if (!isIgnoringDamage(this)) g_fakeDead = true;
+            g_fakeDead = true;
             return;
         }
         PlayLayer::destroyPlayer(player, obj);
@@ -182,7 +167,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         return true;
     }
 
-    bool isWave() { return m_player1->m_isDart || g_waveStreak >= 3; }
+    bool isWave() { return m_player1 && (m_player1->m_isDart || g_waveStreak >= 3); }
 
     void flipGravity(PlayerObject* player, bool flip, bool noEffects) {
         if (g_simulating || isClone(player)) {
@@ -253,8 +238,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         p->m_playEffects = false;
     }
 
-    // Copy live ground / collision state from the real player.
-    // Checkpoints do not reliably restore these runtime flags.
     void syncGroundState(PlayerObject* dst, PlayerObject* src) {
         if (!dst || !src) return;
         dst->m_isOnGround  = src->m_isOnGround;
@@ -285,6 +268,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         held = down;
     }
 
+    // A non-zero checkCollisions result IS a damaging hit. Floor spikes return
+    // that while the cube is still flagged on the ground, so do not filter them
+    // out. Noclip must not apply here either: the fake has to die on the spike
+    // or an early click looks identical to a clean one.
     bool stepFake(PlayerObject* p) {
         const float dt = 0.25f;
         if (p->m_collisionLogTop)    p->m_collisionLogTop->removeAllObjects();
@@ -292,6 +279,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         if (p->m_collisionLogLeft)   p->m_collisionLogLeft->removeAllObjects();
         if (p->m_collisionLogRight)  p->m_collisionLogRight->removeAllObjects();
         p->m_playEffects = false;
+        p->m_ignoreDamage = false;
 
         g_fakeDead = false;
         g_simulating = true;
@@ -300,12 +288,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         g_simulating = false;
         hideClone(p);
 
-        bool ignore = isIgnoringDamage(this);
-        bool died = (!ignore) && (g_fakeDead || p->m_isDead);
-
-        if (!died && hit && !ignore) {
-            if (touchKills(p) || !onGround(p)) died = true;
-        }
+        bool died = g_fakeDead || p->m_isDead || hit != 0;
         if (died) g_fakeDead = true;
         return died;
     }
@@ -313,7 +296,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     int trial(const Ev& ev, bool heldPre, int horizon) {
         g_fakeB->loadFromCheckpoint(g_cpT);
         wake(g_fakeB);
-        // Keep ground state consistent with the moment we decided to try the input
         syncGroundState(g_fakeB, g_fakeA);
         bool held = heldPre;
         applyEdge(g_fakeB, held, ev.down);
@@ -326,14 +308,31 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
     void decide(Ev ev) {
         bool wave = isWave();
+        bool cubePress = !wave && ev.down && cubeLike(m_player1);
         int limit = wave ? STAGES[g_stage].wave : STAGES[g_stage].all;
-        int horizon = wave ? std::min(16, std::max(8, limit + 4))
-                           : std::min(12, std::max(8, limit + 4));
+        // Cube has to look past the landing, not just the takeoff. A jump into
+        // the spikes in the screenshot is still airborne after a few steps.
+        int horizon = (wave || cubePress)
+            ? std::min(28, std::max(16, limit + 8))
+            : std::min(12, std::max(8, limit + 4));
 
         if (!ensureFakes()) {
             log::info("[InputBuffer] could not create clone players, raw input");
             applyNow(ev.down, ev.button, ev.p1);
             return;
+        }
+
+        // Built-in Ignore Damage (and mods that flip the same flags) would make
+        // checkCollisions return 0. Clear them only for the search, then put
+        // them back so the real player stays in noclip.
+        auto* pl = PlayLayer::get();
+        bool savedIgnore = false;
+        bool savedEnabled = false;
+        if (pl) {
+            savedIgnore = pl->m_ignoreDamage;
+            savedEnabled = pl->m_isIgnoreDamageEnabled;
+            pl->m_ignoreDamage = false;
+            pl->m_isIgnoreDamageEnabled = false;
         }
 
         auto t0 = std::chrono::steady_clock::now();
@@ -360,7 +359,6 @@ class $modify(BufferLayer, GJBaseGameLayer) {
         m_player1->saveToCheckpoint(g_cpReal);
         g_fakeA->loadFromCheckpoint(g_cpReal);
         wake(g_fakeA);
-        // CRITICAL for cube: restore live ground flags (checkpoint does not)
         syncGroundState(g_fakeA, m_player1);
         bool heldPre = g_held;
         syncHold(g_fakeA, heldPre);
@@ -377,29 +375,32 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
 
             if (t >= startDelay) {
-                g_fakeA->saveToCheckpoint(g_cpT);
-                int life = trial(ev, heldPre, horizon);
-                bool full = life >= (wave ? horizon : NEED);
-                tried += full ? 'S' : 'x';
+                bool jumpable = !cubePress || onGround(g_fakeA);
+                if (jumpable) {
+                    g_fakeA->saveToCheckpoint(g_cpT);
+                    int life = trial(ev, heldPre, horizon);
+                    bool full = life >= horizon;
+                    tried += full ? 'S' : 'x';
 
-                if (life > bestLife) {
-                    bestLife = life;
-                    bestT = t;
-                }
+                    if (life > bestLife) {
+                        bestLife = life;
+                        bestT = t;
+                    }
 
-                if (wave) {
-                    if (life >= horizon) {
+                    // Wave and cube: first timing that survives the whole
+                    // look-ahead. That is the early click held until the jump
+                    // clears the spikes, not the first click that lives 4 steps.
+                    if (wave || cubePress) {
+                        if (life >= horizon) {
+                            chosen = t;
+                            break;
+                        }
+                    } else if (life >= NEED) {
                         chosen = t;
                         break;
                     }
                 } else {
-                    // Cube-like press: only accept when we are actually on the ground
-                    // (i.e. “hold until it’s good to jump”). Other modes just need survival.
-                    bool isCubePress = ev.down && cubeLike(g_fakeA);
-                    if (life >= NEED && (!isCubePress || canJump(g_fakeA))) {
-                        chosen = t;
-                        break;
-                    }
+                    tried += '.';
                 }
             }
 
@@ -411,6 +412,10 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             f.o->m_activated = f.a;
             f.o->m_activatedByPlayer1 = f.b;
             f.o->m_activatedByPlayer2 = f.c;
+        }
+        if (pl) {
+            pl->m_ignoreDamage = savedIgnore;
+            pl->m_isIgnoreDamageEnabled = savedEnabled;
         }
         g_simulating = false;
         bury(g_fakeA);
@@ -507,7 +512,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
 
 $on_mod(Loaded) {
     log::info("====================================================");
-    log::info("[InputBuffer] v10.2 LOADED (cube hold-until-jump + noclip)");
+    log::info("[InputBuffer] v10.3 LOADED (cube spike look-ahead, noclip-safe sim)");
     log::info("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
     log::info("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> 32/32 -> OFF");
     log::info("====================================================");

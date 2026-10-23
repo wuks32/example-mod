@@ -270,3 +270,4 @@ class $modify(ToolKeys, CCKeyboardDispatcher) {
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
     }
 };
+z

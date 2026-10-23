@@ -1,19 +1,9 @@
 {
-    "geode": "5.11.1",
-    "gd": {
-        "win": "2.2081"
-    },
-    "id": "albi.predictive-input-buffer",
-    "name": "Predictive Input Buffer",
-    "version": "v4.6.0",
-    "developer": "Albi",
-    "description": "Buffers early inputs. F6 cycles the buffer stage.",
-    "settings": {
-        "allow-normal-mode": {
-            "type": "bool",
-            "name": "Allow outside practice mode",
-            "description": "Off = the buffer only works in practice mode.",
-            "default": false
-        }
-    }
+  "geode": "5.1.11",
+  "gd": { "win": "2.2081" },
+  "id": "yourname.practice-macro",
+  "name": "Practice Macro",
+  "version": "v0.1.0",
+  "developer": "yourname",
+  "description": "Record/replay, frame stepping, checkpoint-aware practice tool."
 }

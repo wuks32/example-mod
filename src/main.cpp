@@ -33,10 +33,10 @@ namespace {
     };
 
     constexpr Stage STAGES[STAGE_COUNT] = {
-        { true, 2, 2, "[InputBuffer] F6 Cycle -> STAGE 1: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)" },
-        { true, 4, 4, "[InputBuffer] F6 Cycle -> STAGE 2: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)" },
-        { true, 8, 8, "[InputBuffer] F6 Cycle -> STAGE 3: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)" },
-        { true, 16, 8, "[InputBuffer] F6 Cycle -> STAGE 4: 16 Ticks All | 8 Ticks Wave (4.0f / 2.0f @ 60fps)" },
+        { true, 0, 0, "[InputBuffer] F6 Cycle -> STAGE 1: 0 Ticks (no delay / no buffer)" },
+        { true, 0, 0, "[InputBuffer] F6 Cycle -> STAGE 2: 0 Ticks (no delay / no buffer)" },
+        { true, 0, 0, "[InputBuffer] F6 Cycle -> STAGE 3: 0 Ticks (no delay / no buffer)" },
+        { true, 0, 0, "[InputBuffer] F6 Cycle -> STAGE 4: 0 Ticks (no delay / no buffer)" },
         { false, 0, 0, "[InputBuffer] F6 Cycle -> STAGE 5: OFF (100% Raw Input)" },
     };
 
@@ -51,8 +51,8 @@ namespace {
         bool isPlayer1 = true;
         bool enabled = true;
         int stage = 0;
-        int ticksAll = 2;
-        int ticksWave = 2;
+        int ticksAll = 0;
+        int ticksWave = 0;
         int pending = -1;
         bool pendingState = true;
         bool releaseQueued = false;
@@ -311,7 +311,7 @@ namespace {
 
         char const* name = down ? "PRESS" : "RELEASE";
         buf.releaseQueued = false;
-        int horizon = mini ? 28 : (anyWave ? 38 : 64);
+        int horizon = mini ? 28 : (anyWave ? 38 : 48);
         int maxDelay = anyWave ? buf.ticksWave : buf.ticksAll;
 
         bool diedEarly = false;
@@ -426,8 +426,8 @@ $on_mod(Loaded) {
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     std::puts("============================================================");
     std::puts(" [InputBuffer] v4.7 LOADED (Zero-Lag + Up Arrow Fix)");
-    std::puts(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)");
-    std::puts(" [InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF");
+    std::puts(" [InputBuffer] Starting Mode: STAGE 1 (0 Ticks - no delay / no buffer)");
+    std::puts(" [InputBuffer] Press F6 in-level to cycle: 0 -> 0 -> 0 -> 0 -> OFF");
     std::puts("============================================================");
 }
 

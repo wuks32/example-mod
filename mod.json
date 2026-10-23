@@ -1,9 +1,9 @@
 {
-  "geode": "5.1.11",
+  "geode": "5.11.2",
   "gd": { "win": "2.2081" },
   "id": "yourname.practice-macro",
   "name": "Practice Macro",
   "version": "v0.1.0",
-  "developer": "yourname",
+  "developer": "wuka",
   "description": "Record/replay, frame stepping, checkpoint-aware practice tool."
 }

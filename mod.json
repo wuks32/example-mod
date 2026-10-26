@@ -1,9 +1,12 @@
+
 {
-  "geode": "5.11.2",
-  "gd": { "win": "2.2081" },
-  "id": "yourname.practice-macro",
-  "name": "Practice Macro",
-  "version": "v0.1.0",
-  "developer": "wuka",
-  "description": "Record/replay, frame stepping, checkpoint-aware practice tool."
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"version": "v5.0.0",
+	"id": "ai.predictivebuffer",
+	"name": "Predictive Input Buffer",
+	"developer": "lilWC",
+	"description": "Predictive input buffer + guided replays for Grief, Andromeda, Slaughterhouse, Solar Flare, Subsuming Vortex, Society (partial name matching)."
 }

@@ -828,20 +828,18 @@ namespace {
     void updateGuided(PlayLayer* layer) {
         if (!buf.guidedMode || !buf.pattern || buf.patternIndex >= buf.patternSize) return;
 
-        // Approximate frame from time (most recordings are 240fps)
-        // We use a simple counter that increments every update
-        // For better accuracy we also look at m_time
-        float time = layer->m_gameState.m_time;
-        int approxFrame = static_cast<int>(time * 240.0f); // assume 240 as base
+        // Simple frame counter (increments every update call)
+        // Recordings were made at 240fps
+        ++buf.currentFrame;
 
         while (buf.patternIndex < buf.patternSize) {
             const auto& inp = buf.pattern[buf.patternIndex];
-            if (approxFrame < inp.frame) break;
+            if (buf.currentFrame < inp.frame) break;
 
             // Apply this input
             sendButton(layer, inp.down);
-            std::printf("[Guided] Frame ~%d -> %s (recorded frame %d)\n",
-                approxFrame, inp.down ? "PRESS" : "RELEASE", inp.frame);
+            std::printf("[Guided] Frame %d -> %s (recorded frame %d)\n",
+                buf.currentFrame, inp.down ? "PRESS" : "RELEASE", inp.frame);
             ++buf.patternIndex;
         }
     }

@@ -826,22 +826,35 @@ namespace {
     }
 
     void updateGuided(PlayLayer* layer) {
+        // Only advances the pattern index so we know what the "correct" next input is.
+        // Does NOT force any clicks — the player still plays, the buffer just becomes smarter.
         if (!buf.guidedMode || !buf.pattern || buf.patternIndex >= buf.patternSize) return;
 
-        // Simple frame counter (increments every update call)
-        // Recordings were made at 240fps
         ++buf.currentFrame;
 
+        // Advance past inputs that are already in the past
         while (buf.patternIndex < buf.patternSize) {
             const auto& inp = buf.pattern[buf.patternIndex];
             if (buf.currentFrame < inp.frame) break;
-
-            // Apply this input
-            sendButton(layer, inp.down);
-            std::printf("[Guided] Frame %d -> %s (recorded frame %d)\n",
-                buf.currentFrame, inp.down ? "PRESS" : "RELEASE", inp.frame);
             ++buf.patternIndex;
         }
+    }
+
+    // Returns true if the predicted delay would go against the next recorded input
+    bool wouldConflictWithRecording(bool down, int delayTicks) {
+        if (!buf.guidedMode || !buf.pattern || buf.patternIndex >= buf.patternSize) return false;
+
+        // Look at the next few recorded inputs
+        int futureFrame = buf.currentFrame + delayTicks;
+        for (size_t i = buf.patternIndex; i < buf.patternSize && i < buf.patternIndex + 6; ++i) {
+            const auto& inp = buf.pattern[i];
+            // If a recorded input of the opposite type is very close, don't delay
+            if (inp.frame > futureFrame + 8) break;
+            if (inp.down != down && inp.frame <= futureFrame + 4) {
+                return true; // conflict
+            }
+        }
+        return false;
     }
 
     // ===================== PREDICTIVE BUFFER (original + fixes) =====================
@@ -908,9 +921,6 @@ namespace {
     bool intercept(GJBaseGameLayer* self, bool down, bool isPlayer1) {
         auto* layer = GameManager::get()->m_playLayer;
         if (!layer) return false;
-
-        // In guided mode we ignore the predictive intercept
-        if (buf.guidedMode) return false;
 
         bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
         auto* level = layer->m_level;
@@ -992,8 +1002,15 @@ namespace {
 
         if (saved <= 0) { buf.appliedInput = down; return false; }
 
-        std::printf("[InputBuffer] *** SAVED +%d TICKS %s! (Level: %s) ***\n",
-            saved, name, buf.levelName.c_str());
+        // If we have a recording for this level, don't delay in a way that conflicts with the real pattern
+        if (buf.guidedMode && wouldConflictWithRecording(down, saved)) {
+            buf.appliedInput = down;
+            return false;
+        }
+
+        std::printf("[InputBuffer] *** SAVED +%d TICKS %s! (Level: %s)%s ***\n",
+            saved, name, buf.levelName.c_str(),
+            buf.guidedMode ? " [pattern-aware]" : "");
         buf.pendingState = down;
         buf.pending = saved;
         return true;
@@ -1174,8 +1191,9 @@ class $modify(BufPlayerObject, PlayerObject) {
                 if (GetAsyncKeyState(VK_F6) & 1) cycleStage();
 
                 if (buf.guidedMode) {
-                    updateGuided(layer);
-                } else if (buf.enabled) {
+                    updateGuided(layer);   // only advances pattern knowledge, never forces inputs
+                }
+                if (buf.enabled) {
                     deliverPending(layer, this);
                 }
             }
